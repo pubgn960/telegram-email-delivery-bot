@@ -1,7 +1,8 @@
 """
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
 Defines schemas and indexes for Orders, Images, Settings, AuthorizedUsers, ClientGroups, and Loaders tables
-supporting two-group reply-based workflow, role-based user management, Group Category Routing (v1.2), and Multi Loader Approval System.
+supporting two-group reply-based workflow, role-based user management, Group Category Routing (v1.2),
+Multi Loader Approval System, and Category A Only Price Workflow (v1.20.0).
 """
 
 from datetime import datetime, timezone
@@ -117,7 +118,7 @@ class AuthorizedUser(Base):
 class Order(Base):
     """
     Represents an Order record in the two-group reply-based workflow.
-    Tracks client message, forwarded loader message, loader group ID, status, package details, and stored image file_ids.
+    Tracks client message, forwarded loader message, loader group ID, status, package details, category ('A'/'B'), price, and stored image file_ids.
     """
 
     __tablename__ = "orders"
@@ -130,6 +131,8 @@ class Order(Base):
     loader_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     loader_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Pending Approval, Pending Payment, Approved, Rejected, Delivered, Cancelled, Expired
+    category: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, default="A")  # 'A' or 'B'
+    price: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     media_group_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
@@ -155,7 +158,7 @@ class Order(Base):
 
     def __repr__(self) -> str:
         img_count = len(self.__dict__['images']) if 'images' in self.__dict__ else self.image_count
-        return f"<Order(id={self.id}, email='{self.email}', status='{self.status}', images={img_count})>"
+        return f"<Order(id={self.id}, email='{self.email}', category='{self.category}', price='{self.price}', status='{self.status}', images={img_count})>"
 
 
 class Image(Base):
@@ -173,7 +176,7 @@ class Image(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Many-to-one relationship to Order
-    order: Mapped["Order"] = relationship("Order", back_populates="images")
+    order: Mapped["Image"] = relationship("Order", back_populates="images")
 
     def __repr__(self) -> str:
         return f"<Image(id={self.id}, order_id={self.order_id}, file_type='{self.file_type}', position={self.position})>"

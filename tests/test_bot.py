@@ -8,6 +8,7 @@ Group Category Routing System (v1.2: Category A, Category B, Payment Review, App
 Multi-Loader Approval System (Loader CRUD, LOADERS_CACHE, Multi-Loader Assignment),
 Telegram BotCommand Validation (validate_bot_command),
 Loader Add Wizard state isolation (LOADER_ADD_SESSION),
+Category A Only Price Workflow (update_order_price),
 and two-group reply-based DB operations.
 """
 
@@ -36,6 +37,7 @@ from database import (
     get_client_group_category,
     update_payment_review_group,
     update_order_status,
+    update_order_price,
     add_authorized_user,
     remove_authorized_user,
     get_all_authorized_users,
@@ -61,6 +63,29 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestCategoryAPriceWorkflow(unittest.IsolatedAsyncioTestCase):
+    """Tests Category A Price workflow DB updates."""
+
+    async def test_order_price_update(self):
+        await init_db()
+
+        email = "price_test@example.com"
+        order = await create_order(email, category="A")
+        self.assertIsNone(order.price)
+        self.assertEqual(order.category, "A")
+
+        # Set Price
+        updated = await update_order_price(order.id, "2500")
+        self.assertEqual(updated.price, "2500")
+
+        # Edit Price
+        edited = await update_order_price(order.id, "2800")
+        self.assertEqual(edited.price, "2800")
+
+        # Clean up
+        await delete_orders_by_email(email)
 
 
 class TestLoaderWizardState(unittest.TestCase):

@@ -1,7 +1,7 @@
 """
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
-backup/restore, detailed statistics dashboard, and Multi-Loader Category B management.
+backup/restore, detailed statistics dashboard, Multi-Loader Category B management, and Category A Price Workflow.
 Includes global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE for high-performance zero-query filtering.
 """
 
@@ -487,6 +487,23 @@ async def update_order_status(order_id: int, status: str) -> Optional[Order]:
         return res.unique().scalar_one_or_none()
 
 
+async def update_order_price(order_id: int, price_str: str) -> Optional[Order]:
+    """Updates order price by Order ID."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(price=price_str)
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+        res = await session.execute(
+            select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+        )
+        return res.unique().scalar_one_or_none()
+
+
 # ==========================================
 # Role-Based User Management Operations
 # ==========================================
@@ -598,7 +615,8 @@ async def create_order(
     client_chat_id: Optional[int] = None,
     original_message_id: Optional[int] = None,
     package: str = "",
-    status: str = "Pending"
+    status: str = "Pending",
+    category: str = "A"
 ) -> Order:
     """
     Creates a new Order record and returns generated Order object.
@@ -613,6 +631,8 @@ async def create_order(
             loader_group_id=None,
             loader_message_id=None,
             status=status,
+            category=category,
+            price=None,
             image_count=0,
             media_group_id=None,
             fingerprint=None,
@@ -622,7 +642,7 @@ async def create_order(
         await session.commit()
         await session.refresh(new_order)
 
-        logger.info(f"New Order | Order ID: #{new_order.id} | Email: {email_clean} | Status: {status}")
+        logger.info(f"New Order | Order ID: #{new_order.id} | Email: {email_clean} | Status: {status} | Category: {category}")
         return new_order
 
 
@@ -950,12 +970,12 @@ async def export_orders_to_csv() -> str:
 
         output = io.StringIO()
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(["Order ID", "Email", "Package", "Status", "Images", "Created", "Delivered"])
+        writer.writerow(["Order ID", "Email", "Package", "Status", "Price", "Images", "Created", "Delivered"])
 
         for o in orders:
             created_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S")
             delivered_str = o.delivered_at.strftime("%Y-%m-%d %H:%M:%S") if o.delivered_at else "Pending"
-            writer.writerow([o.id, o.email, o.package or "N/A", o.status, len(o.images), created_str, delivered_str])
+            writer.writerow([o.id, o.email, o.package or "N/A", o.status, o.price or "N/A", len(o.images), created_str, delivered_str])
 
         return output.getvalue()
 

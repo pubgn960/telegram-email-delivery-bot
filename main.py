@@ -28,6 +28,8 @@ from handlers import (
     delivery_group_handler,
     duplicate_order_callback_handler,
     category_b_approval_callback_handler,
+    price_callback_handler,
+    price_input_text_handler,
     category_a_command,
     category_b_command,
     category_check_command,
@@ -224,12 +226,20 @@ def main() -> None:
     # Register Interactive Callback Query Handlers
     application.add_handler(CallbackQueryHandler(duplicate_order_callback_handler, pattern="^dup_"))
     application.add_handler(CallbackQueryHandler(category_b_approval_callback_handler, pattern="^catb_"))
+    application.add_handler(CallbackQueryHandler(price_callback_handler, pattern="^price_"))
 
-    # Register loader_text_wizard_handler for interactive /loaderadd step wizard
+    # Register loader_text_wizard_handler and price_input_text_handler
     application.add_handler(
         MessageHandler(
             filters.TEXT & (~filters.COMMAND),
             loader_text_wizard_handler
+        ),
+        group=0
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & (~filters.COMMAND),
+            price_input_text_handler
         ),
         group=0
     )

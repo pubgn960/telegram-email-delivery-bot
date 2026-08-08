@@ -5,15 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-08-09
+
+### Added & Changed
+- **Category A Only Price Workflow (`models.py`, `database.py`, `delivery.py`, `handlers.py`, `main.py`)**:
+  - Added `category` and `price` columns to `orders` database model.
+  - **Category A Delivery Completion**:
+    - After an order is delivered to customer, appends `[💰 Price]` inline button to delivery completion message in Loader Group ONLY for Category A orders.
+    - Category B orders show NO price buttons and maintain their existing workflow completely unchanged.
+  - **Interactive Admin Price Entry**:
+    - Clicking `💰 Price` prompts authorized admin: `Enter order price.`.
+    - Admin enters price (e.g. `2500`). Saves value to `orders.price`.
+    - Edits delivery completion message to display `💰 Price: Rs.2500` and changes inline button to `[✏️ Edit Price]`.
+  - **Editing Price**:
+    - Clicking `✏️ Edit Price` prompts admin for a new price, updates `orders.price` and delivery completion message (e.g. `💰 Price: Rs.2800`).
+  - **VERY IMPORTANT - Calculator Bot Reply**:
+    - Every time a price is entered or edited, the bot sends a **NEW reply message** to the delivery message containing **ONLY the raw numeric value** (e.g. `2500` or `2800`) so external calculator bots can read it automatically.
+    - Outputs structured log: `[PRICE]\nOrder #25\nPrice set to 2500` / `Calculator reply sent.`.
+
 ## [1.20.0] - 2026-08-09
 
 ### Fixed & Changed
 - **Loader Add Wizard State Isolation Fix (`loader_text_wizard_handler`)**:
   - Restricts `loader_text_wizard_handler` execution strictly to admin users with an active wizard session in `LOADERS_ADD_SESSION[user_id]`.
-  - Immediately returns without replying or consuming messages if no active wizard session exists for the sending user.
-  - Matches the initiating chat context (`chat_id`) so text sent in other chats is ignored.
-  - Completely clears wizard state (`LOADER_ADD_SESSION.pop(user_id, None)`) upon wizard completion, user cancellation (`/cancel`, `exit`), 5-minute timeout (300s), or errors.
-  - Ensures normal group chatter, customer orders, loader replies, `wrong` workflow, delivery captions, and commands bypass the wizard completely without interference.
 
 ## [1.19.0] - 2026-08-09
 

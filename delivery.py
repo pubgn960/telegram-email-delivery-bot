@@ -1,8 +1,9 @@
 """
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
 dispatching image albums to the Client Group with Email as First Image Caption,
-Telegram API retries, database status updates, Loader confirmations, and Telegram reactions.
-Includes structured logging tags ([DELIVERY], [REACTION]).
+Telegram API retries, database status updates, Loader confirmations, Telegram reactions,
+and Category A Only Price Workflow.
+Includes structured logging tags ([DELIVERY], [REACTION], [PRICE]).
 """
 
 import html
@@ -10,13 +11,14 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Union, Optional, Any
-from telegram import Bot, InputMediaPhoto, InputMediaDocument
+from telegram import Bot, InputMediaPhoto, InputMediaDocument, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from config import Config
 from email_parser import extract_last_email
 from database import (
     BOT_SETTINGS,
+    CLIENT_GROUPS_CACHE,
     get_order_by_id,
     get_all_orders_by_email,
     get_current_settings,
@@ -84,19 +86,11 @@ async def deliver_order_by_id(
 ) -> bool:
     """
     Delivers stored image albums for an order to the Client Group, placing Email as the caption
-    of the FIRST image in the album (no separate text message or summary card sent),
+    of the FIRST image in the album (no separate text message or summary card sent to customer),
     adds ❤️ reactions to original customer message and loader delivery message, and notifies Loader Group.
-
-    Args:
-        bot (Bot): Telegram Bot instance.
-        order_id (int): Target Order ID.
-        loader_chat_id (Optional[int]): Loader Group Chat ID.
-        loader_reply_msg_id (Optional[int]): Loader message ID to reply to / edit.
-        target_delivery_chat_id (Optional[int]): Override Client Group Chat ID.
-        caption_text (Optional[str]): Caption or text from Loader's reply message.
-
-    Returns:
-        bool: True if images were delivered successfully, False otherwise.
+    Supports Category A Only Price Workflow:
+    - Category A: Attaches '💰 Price' (or '✏️ Edit Price') button to loader delivery completion message.
+    - Category B: Attaches NO buttons, keeping existing Category B workflow unchanged.
     """
     order = await get_order_by_id(order_id)
 
@@ -142,7 +136,7 @@ async def deliver_order_by_id(
 
     # Determine Client Group Chat ID (from order, target parameter, or in-memory cache)
     client_chat_id = target_delivery_chat_id or order.client_chat_id or BOT_SETTINGS["source_group_id"]
-    loader_group_id = loader_chat_id or BOT_SETTINGS["delivery_group_id"]
+    loader_group_id = loader_chat_id or order.loader_group_id or BOT_SETTINGS["delivery_group_id"]
 
     if not client_chat_id:
         logger.error(f"[DELIVERY] Delivery failed: Client Group ID not found for Order #{order_id}.")
@@ -243,18 +237,32 @@ async def deliver_order_by_id(
         else:
             logger.warning("Reaction not supported.")
 
-        # Send confirmation message to Loader Group
+        # Determine Group Category ('A' or 'B')
+        order_category = order.category or (CLIENT_GROUPS_CACHE.get(order.client_chat_id, "A") if order.client_chat_id else "A")
+
+        # Format loader delivery confirmation card
+        price_line = f"\n\n💰 <b>Price:</b> Rs.{order.price}" if order.price else ""
         loader_notice = (
-            f"✅ <b>DELIVERED</b>\n\n"
-            f"<b>Order ID:</b>\n#{order.id}\n\n"
-            f"<b>Images:</b>\n{total_images}\n\n"
-            f"<b>Delivered:</b>\n{now_str}"
+            f"📧 <b>Email</b>\n{html.escape(email_for_caption)}\n\n"
+            f"✅ <b>Delivery Completed</b>{price_line}"
         )
+
+        # Category A Only Price Workflow:
+        # Category A -> Show 💰 Price / ✏️ Edit Price button
+        # Category B -> Show NO buttons (keep Category B workflow unchanged)
+        keyboard = None
+        if order_category == "A":
+            if order.price:
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
+            else:
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
+
         try:
             await bot.send_message(
                 chat_id=loader_group_id,
                 text=loader_notice,
                 reply_to_message_id=target_loader_msg_id,
+                reply_markup=keyboard,
                 parse_mode="HTML"
             )
         except Exception as e:

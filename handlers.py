@@ -6,9 +6,10 @@ Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Messa
 Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
 Group Category Routing System (v1.2: Category A vs Category B with fixed Payment Review Group -1004441603990),
 Multi-Loader Interactive Category B Approval System (/loaderadd, /loaderlist, /loaderremove, Accept/Reject buttons),
+Category A Only Price Workflow (💰 Price / ✏️ Edit Price, numeric-only calculator reply),
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE for zero-database-query filtering.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT], [LOADER_MGMT]).
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT], [LOADER_MGMT], [PRICE]).
 """
 
 import io
@@ -18,6 +19,7 @@ import html
 import shutil
 import logging
 from datetime import datetime, timezone
+from typing import Dict, Any
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
@@ -42,6 +44,7 @@ from database import (
     remove_client_group_category,
     get_client_group_category,
     update_order_status,
+    update_order_price,
     remove_source_group,
     remove_delivery_group,
     reset_groups,
@@ -83,7 +86,10 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 # Temporary memory state for interactive /loaderadd step-by-step wizard (user_id -> session dict)
-LOADER_ADD_SESSION: dict = {}
+LOADER_ADD_SESSION: Dict[int, Dict[str, Any]] = {}
+
+# Temporary memory state for interactive price input workflow (user_id -> session dict)
+PRICE_INPUT_SESSION: Dict[int, Dict[str, Any]] = {}
 
 
 # ==========================================
@@ -151,7 +157,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             client_chat_id=chat.id,
             original_message_id=message.message_id,
             package=package_desc,
-            status="Duplicate_Pending"
+            status="Duplicate_Pending",
+            category=category
         )
         keyboard = InlineKeyboardMarkup([
             [
@@ -190,7 +197,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             client_chat_id=chat.id,
             original_message_id=message.message_id,
             package=package_desc,
-            status="Pending Approval"
+            status="Pending Approval",
+            category="B"
         )
 
         payment_group_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
@@ -238,7 +246,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             client_chat_id=chat.id,
             original_message_id=message.message_id,
             package=package_desc,
-            status="Pending"
+            status="Pending",
+            category="A"
         )
 
         loader_group_id = BOT_SETTINGS["delivery_group_id"]
@@ -349,7 +358,8 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
                 client_chat_id=client_chat_id,
                 original_message_id=original_msg_id,
                 package=package_desc,
-                status="Pending Approval"
+                status="Pending Approval",
+                category="B"
             )
             payment_group_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
             if payment_group_id and client_chat_id and original_msg_id:
@@ -393,7 +403,8 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
                 client_chat_id=client_chat_id,
                 original_message_id=original_msg_id,
                 package=package_desc,
-                status="Pending"
+                status="Pending",
+                category="A"
             )
             loader_group_id = BOT_SETTINGS["delivery_group_id"]
             if loader_group_id and client_chat_id and original_msg_id:
@@ -439,6 +450,172 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
             await query.edit_message_text("❌ Order cancelled.", parse_mode="HTML")
         except Exception as e:
             logger.exception(f"[CLIENT] Failed to edit cancelled message text: {e}")
+
+
+# ==========================================
+# Category A Only Price Workflow Handlers
+# ==========================================
+
+async def price_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles '💰 Price' and '✏️ Edit Price' inline button callbacks for Category A orders.
+    Restricted strictly to authorized admins.
+    Category B orders display NO price buttons and bypass this workflow entirely.
+    """
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith(("price_set:", "price_edit:")):
+        return
+
+    user = update.effective_user
+    if not user or not is_admin(user.id):
+        try:
+            await query.answer("⛔ Only authorized admins can set or edit price.", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.exception(f"[PRICE] Failed to answer callback query: {e}")
+
+    data = query.data
+    parts = data.split(":")
+    action = parts[0]
+
+    if len(parts) < 2 or not parts[1].isdigit():
+        return
+
+    order_id = int(parts[1])
+    order = await get_order_by_id(order_id)
+    if not order:
+        try:
+            await query.message.reply_text("❌ Order not found.")
+        except Exception as e:
+            logger.exception(f"[PRICE] Failed to send error message: {e}")
+        return
+
+    # Check Category A requirement
+    category = order.category or (CLIENT_GROUPS_CACHE.get(order.client_chat_id, "A") if order.client_chat_id else "A")
+    if category != "A":
+        logger.warning(f"[PRICE] Price button pressed for non-Category A order #{order_id}. Ignored.")
+        return
+
+    # Store price input session for this admin user
+    PRICE_INPUT_SESSION[user.id] = {
+        "order_id": order.id,
+        "chat_id": query.message.chat.id,
+        "delivery_msg_id": query.message.message_id,
+        "is_edit": (action == "price_edit"),
+        "created_at": datetime.now(timezone.utc)
+    }
+
+    try:
+        await query.message.reply_text("Enter order price.", reply_to_message_id=query.message.message_id)
+    except Exception as e:
+        logger.exception(f"[PRICE] Failed to prompt admin for price: {e}")
+
+
+async def price_input_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles admin text input when setting or editing an order price for Category A orders.
+    Silently bypasses if user has no active price input session.
+    Extracts raw numeric digits, updates database, edits delivery completion message,
+    and sends a NEW numeric-only reply message for the calculator bot.
+    """
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+
+    # Rule 1: Immediately return without replying or consuming if user has no active price session
+    if not user or not message or user.id not in PRICE_INPUT_SESSION:
+        return
+
+    # Rule 2: Check admin permissions
+    if not is_admin(user.id):
+        PRICE_INPUT_SESSION.pop(user.id, None)
+        return
+
+    session = PRICE_INPUT_SESSION[user.id]
+
+    # Rule 3: Check initiating chat context
+    if chat and session.get("chat_id") and chat.id != session.get("chat_id"):
+        return
+
+    text = (message.text or "").strip()
+
+    # Rule 4: Cancel if user issues a command or cancels
+    if text.startswith("/") or text.lower() in ("cancel", "exit"):
+        PRICE_INPUT_SESSION.pop(user.id, None)
+        if text.lower() in ("cancel", "exit"):
+            await message.reply_text("❌ Price input cancelled.")
+        return
+
+    # Rule 5: Timeout session after 5 minutes (300 seconds)
+    created_at = session.get("created_at")
+    if created_at and (datetime.now(timezone.utc) - created_at).total_seconds() > 300:
+        PRICE_INPUT_SESSION.pop(user.id, None)
+        return
+
+    # Extract numeric value (only digits)
+    numeric_digits = "".join(filter(str.isdigit, text))
+    if not numeric_digits:
+        await message.reply_text("❌ Invalid price. Please enter numbers only (e.g. 2500).")
+        return
+
+    order_id = session.get("order_id")
+    delivery_msg_id = session.get("delivery_msg_id")
+    is_edit = session.get("is_edit", False)
+
+    order = await get_order_by_id(order_id)
+    if not order:
+        PRICE_INPUT_SESSION.pop(user.id, None)
+        await message.reply_text(f"❌ Order #{order_id} not found.")
+        return
+
+    # 1. Save the value into orders.price in database
+    await update_order_price(order_id, numeric_digits)
+
+    # Log requirement:
+    # [PRICE]
+    # Order #25
+    # Price set to 2500 (or Price updated to 2800)
+    action_str = "updated to" if is_edit else "set to"
+    logger.info(f"[PRICE]\nOrder #{order_id}\nPrice {action_str} {numeric_digits}")
+
+    # 2. Edit existing delivery message
+    delivery_text = (
+        f"📧 <b>Email</b>\n{html.escape(order.email)}\n\n"
+        f"✅ <b>Delivery Completed</b>\n\n"
+        f"💰 <b>Price:</b> Rs.{numeric_digits}"
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order_id}")]])
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=session["chat_id"],
+            message_id=delivery_msg_id,
+            text=delivery_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.exception(f"[PRICE] Failed to edit delivery message: {e}")
+
+    # 3. VERY IMPORTANT CALCULATOR BOT REPLY REQUIREMENT:
+    # Send a NEW reply message to the delivery message containing ONLY the numeric value (e.g. 2800)
+    try:
+        await context.bot.send_message(
+            chat_id=session["chat_id"],
+            text=str(numeric_digits),
+            reply_to_message_id=delivery_msg_id
+        )
+        logger.info("[PRICE]\nCalculator reply sent.")
+    except Exception as e:
+        logger.exception(f"[PRICE] Failed to send calculator reply message: {e}")
+
+    # Remove price input session
+    PRICE_INPUT_SESSION.pop(user.id, None)
 
 
 # ==========================================
@@ -1363,7 +1540,8 @@ async def delivered_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     for idx, order in enumerate(delivered, 1):
         delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
         email_escaped = html.escape(order.email)
-        details.append(f"{idx}. Order <code>#{order.id}</code> | Email: <code>{email_escaped}</code> | Images: <code>{len(order.images)}</code> | Delivered: <code>{delivered_str}</code>")
+        price_str = f" | Price: Rs.{order.price}" if order.price else ""
+        details.append(f"{idx}. Order <code>#{order.id}</code> | Email: <code>{email_escaped}</code>{price_str} | Images: <code>{len(order.images)}</code> | Delivered: <code>{delivered_str}</code>")
 
     await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
 
@@ -1402,10 +1580,11 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         created_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
         delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
         email_escaped = html.escape(order.email)
+        price_str = f" | Price: Rs.{order.price}" if order.price else ""
         status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Approval", "Pending Payment") else "❌")
         details.append(
             f"{idx}. {status_icon} Order <code>#{order.id}</code> | Status: <b>{order.status}</b>\n"
-            f"    Email: <code>{email_escaped}</code> | Images: <b>{len(order.images)}</b>\n"
+            f"    Email: <code>{email_escaped}</code>{price_str} | Images: <b>{len(order.images)}</b>\n"
             f"    Created: <code>{created_str}</code> | Delivered: <code>{delivered_str}</code>"
         )
 
@@ -1439,6 +1618,8 @@ async def order_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📦 <b>Order Detailed Information</b>\n\n"
         f"<b>Order ID:</b> #{order.id}\n"
         f"<b>Status:</b> {status_icon} {order.status}\n"
+        f"<b>Category:</b> {order.category or 'A'}\n"
+        f"<b>Price:</b> {order.price or 'Unset'}\n"
         f"<b>Email:</b> <code>{email_escaped}</code>\n"
         f"<b>Package:</b> <i>{pkg_escaped}</i>\n"
         f"<b>Stored Images:</b> {len(order.images)}\n"
