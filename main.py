@@ -13,6 +13,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters
 )
 
@@ -22,6 +23,7 @@ from utils import setup_logging
 from handlers import (
     source_group_handler,
     delivery_group_handler,
+    duplicate_order_callback_handler,
     start_command,
     help_command,
     find_command,
@@ -158,6 +160,9 @@ def main() -> None:
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_command))
+
+    # Register Duplicate Order Callback Query Handler
+    application.add_handler(CallbackQueryHandler(duplicate_order_callback_handler, pattern="^dup_"))
 
     # Register Client Group Handler (Group 1 - Customer Orders)
     application.add_handler(

@@ -1,7 +1,7 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
 Tests email, Order ID, package extraction, keyword detection, caption email overrides,
-wrong details workflow, album splitting, SHA256 fingerprinting, user sessions,
+wrong details workflow, duplicate pending order detection, album splitting, SHA256 fingerprinting, user sessions,
 BOT_SETTINGS cache, and two-group reply-based DB operations.
 """
 
@@ -18,6 +18,7 @@ from database import (
     create_order,
     set_order_loader_message_id,
     get_order_by_id,
+    get_pending_order_by_email,
     get_order_by_loader_msg_id,
     add_images_to_order,
     mark_order_delivered,
@@ -33,6 +34,32 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestDuplicateOrderDetection(unittest.IsolatedAsyncioTestCase):
+    """Tests duplicate pending order detection."""
+
+    async def test_get_pending_order_by_email(self):
+        await init_db()
+
+        email = "dup_detect_test@example.com"
+        # No pending order initially
+        initial = await get_pending_order_by_email(email)
+        self.assertIsNone(initial)
+
+        # Create pending order
+        o1 = await create_order(email, status="Pending")
+        found = await get_pending_order_by_email(email)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, o1.id)
+
+        # Deliver order
+        await mark_order_delivered(o1.id)
+        found_after_del = await get_pending_order_by_email(email)
+        self.assertIsNone(found_after_del)
+
+        # Cleanup
+        await delete_orders_by_email(email)
 
 
 class TestCaptionEmailAndWrongDetails(unittest.TestCase):

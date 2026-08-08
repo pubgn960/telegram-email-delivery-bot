@@ -1,7 +1,8 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
-Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow, Telegram Reactions, and Admin Commands.
+Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
+Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS cache for zero-database-query message filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
 """
@@ -13,9 +14,10 @@ import html
 import shutil
 import logging
 from datetime import datetime, timezone
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
+from sqlalchemy import update as update_sql
 
 from config import Config
 from keywords import contains_order_keyword
@@ -24,6 +26,7 @@ from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
     BOT_SETTINGS,
+    AsyncSessionLocal,
     get_current_settings,
     update_source_group,
     update_delivery_group,
@@ -33,6 +36,7 @@ from database import (
     create_order,
     set_order_loader_message_id,
     get_order_by_id,
+    get_pending_order_by_email,
     get_order_by_loader_msg_id,
     get_pending_orders,
     get_delivered_orders,
@@ -67,9 +71,10 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Monitors messages in Group 1 (Client Group).
     Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
     When a customer sends an order message containing at least one order detection keyword:
-    1. Registers new Order in DB with status 'Pending'.
-    2. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
-    3. Adds 👍 reaction to original customer order message.
+    1. Checks for existing pending orders (Duplicate Order Detection). If duplicate, prompts customer with inline buttons (Place Again / Cancel).
+    2. Registers new Order in DB with status 'Pending'.
+    3. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
+    4. Adds 👍 reaction to original customer order message.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -105,12 +110,40 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     email = extract_email(text_content) or f"order_{message.message_id}@customer.com"
     package_desc = extract_package(text_content)
 
+    # Check Duplicate Pending Order
+    existing_pending = await get_pending_order_by_email(email)
+    if existing_pending:
+        logger.info(f"[CLIENT] Duplicate pending order detected for email '{email}'. Prompting customer in Client Group.")
+        dup_order = await create_order(
+            email=email,
+            client_chat_id=chat.id,
+            original_message_id=message.message_id,
+            package=package_desc,
+            status="Duplicate_Pending"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Place Again", callback_data=f"dup_confirm:{dup_order.id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"dup_cancel:{dup_order.id}")
+            ]
+        ])
+        warning_msg = (
+            "⚠️ <b>Duplicate Order Detected</b>\n\n"
+            "Would you like to place this order again, or was it sent by mistake?"
+        )
+        try:
+            await message.reply_text(warning_msg, reply_markup=keyboard, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[CLIENT] Failed to send duplicate order prompt: {e}")
+        return
+
     # 1. Create Pending Order in DB
     order = await create_order(
         email=email,
         client_chat_id=chat.id,
         original_message_id=message.message_id,
-        package=package_desc
+        package=package_desc,
+        status="Pending"
     )
 
     # 2. Copy Original Customer Message to Loader Group EXACTLY as received (Zero added metadata or headers)
@@ -151,6 +184,89 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info("[REACTION] 👍 Order received")
     else:
         logger.warning("Reaction not supported.")
+
+
+async def duplicate_order_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles inline keyboard button callbacks for duplicate order confirmation (Place Again / Cancel).
+    """
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()
+
+    data = query.data
+    if not data.startswith(("dup_confirm:", "dup_cancel:")):
+        return
+
+    action, order_id_str = data.split(":", 1)
+    if not order_id_str.isdigit():
+        return
+
+    order_id = int(order_id_str)
+    order = await get_order_by_id(order_id)
+
+    if not order:
+        try:
+            await query.edit_message_text("❌ Order record not found.")
+        except Exception:
+            pass
+        return
+
+    loader_group_id = BOT_SETTINGS["delivery_group_id"]
+
+    if action == "dup_confirm":
+        # Customer tapped ✅ Place Again
+        async with AsyncSessionLocal() as session:
+            stmt = update_sql(Order).where(Order.id == order.id).values(status="Pending")
+            await session.execute(stmt)
+            await session.commit()
+
+        # Copy original customer message to Loader Group
+        if loader_group_id and order.client_chat_id and order.original_message_id:
+            try:
+                try:
+                    forwarded_msg = await context.bot.copy_message(
+                        chat_id=loader_group_id,
+                        from_chat_id=order.client_chat_id,
+                        message_id=order.original_message_id
+                    )
+                except Exception:
+                    forwarded_msg = await context.bot.send_message(
+                        chat_id=loader_group_id,
+                        text=f"Order #{order.id} | Email: {order.email}"
+                    )
+
+                await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+                logger.info(f"[CLIENT] Duplicate Order #{order.id} confirmed and copied to Loader Group {loader_group_id}")
+            except Exception as e:
+                logger.error(f"[CLIENT] Failed to post duplicate Order #{order.id} to Loader Group: {e}")
+
+        # Add 👍 reaction to original customer order message
+        if order.client_chat_id and order.original_message_id:
+            await safe_set_message_reaction(
+                bot=context.bot,
+                chat_id=order.client_chat_id,
+                message_id=order.original_message_id,
+                emoji="👍",
+                fallback_emoji=None,
+                log_tag="[REACTION]"
+            )
+
+        try:
+            await query.edit_message_text("✅ Order confirmed and sent to Loader Group.", parse_mode="HTML")
+        except Exception:
+            pass
+
+    elif action == "dup_cancel":
+        # Customer tapped ❌ Cancel
+        await cancel_order(order.id)
+        logger.info(f"[CLIENT] Duplicate Order #{order.id} cancelled by customer.")
+        try:
+            await query.edit_message_text("❌ Order cancelled.", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

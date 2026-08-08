@@ -2,7 +2,8 @@
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
 backup/restore, and detailed statistics dashboard.
-Includes global in-memory BOT_SETTINGS cache for high-performance zero-query message filtering.
+Includes global in-memory BOT_SETTINGS cache for high-performance zero-query message filtering
+and helper for duplicate order detection.
 """
 
 import os
@@ -264,10 +265,11 @@ async def create_order(
     email: str,
     client_chat_id: Optional[int] = None,
     original_message_id: Optional[int] = None,
-    package: str = ""
+    package: str = "",
+    status: str = "Pending"
 ) -> Order:
     """
-    Creates a new Order record in Pending status and returns generated Order object.
+    Creates a new Order record and returns generated Order object.
     """
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
@@ -277,7 +279,7 @@ async def create_order(
             client_chat_id=client_chat_id,
             original_message_id=original_message_id,
             loader_message_id=None,
-            status="Pending",
+            status=status,
             image_count=0,
             media_group_id=None,
             fingerprint=None,
@@ -287,7 +289,7 @@ async def create_order(
         await session.commit()
         await session.refresh(new_order)
 
-        logger.info(f"New Order | Order ID: #{new_order.id} | Email: {email_clean} | Status: Pending")
+        logger.info(f"New Order | Order ID: #{new_order.id} | Email: {email_clean} | Status: {status}")
         return new_order
 
 
@@ -314,6 +316,20 @@ async def get_order_by_id(order_id: int) -> Optional[Order]:
         )
         res = await session.execute(stmt)
         return res.unique().scalar_one_or_none()
+
+
+async def get_pending_order_by_email(email: str) -> Optional[Order]:
+    """Retrieves an active Pending Order matching email if one exists."""
+    email_clean = email.lower().strip()
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Order)
+            .options(joinedload(Order.images))
+            .where(Order.email == email_clean, Order.status == "Pending")
+            .order_by(Order.created_at.desc())
+        )
+        res = await session.execute(stmt)
+        return res.unique().scalars().first()
 
 
 async def get_order_by_loader_msg_id(loader_msg_id: int) -> Optional[Order]:
