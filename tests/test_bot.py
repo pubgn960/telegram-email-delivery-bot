@@ -2,7 +2,8 @@
 Unit test suite for Telegram Email Image Delivery Bot.
 Tests email, Order ID, package extraction, keyword detection, caption email overrides,
 wrong details workflow, duplicate pending order detection, album splitting, SHA256 fingerprinting, user sessions,
-BOT_SETTINGS cache, and two-group reply-based DB operations.
+BOT_SETTINGS cache, Role-Based User Management (AUTH_USERS_CACHE, Super Admin, Delivery Users),
+and two-group reply-based DB operations.
 """
 
 import unittest
@@ -11,10 +12,16 @@ from email_parser import extract_email, extract_order_id, extract_package, extra
 from keywords import contains_order_keyword
 from delivery import chunk_list
 from media_collector import user_session_manager
+from utils import is_super_admin, is_delivery_user
 from database import (
     BOT_SETTINGS,
+    AUTH_USERS_CACHE,
     init_db,
     reload_bot_settings_cache,
+    reload_auth_users_cache,
+    add_authorized_user,
+    remove_authorized_user,
+    get_all_authorized_users,
     create_order,
     set_order_loader_message_id,
     get_order_by_id,
@@ -34,6 +41,46 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestRoleBasedUserManagement(unittest.IsolatedAsyncioTestCase):
+    """Tests role-based user management, database persistence, and permission functions."""
+
+    async def test_role_seeding_and_permissions(self):
+        await init_db()
+
+        # Verify initial seeds in memory cache
+        self.assertTrue(is_super_admin(1573531032))
+        self.assertTrue(is_delivery_user(1573531032))
+
+        self.assertFalse(is_super_admin(1078400998))
+        self.assertTrue(is_delivery_user(1078400998))
+
+        self.assertFalse(is_super_admin(1858358195))
+        self.assertTrue(is_delivery_user(1858358195))
+
+        # Test adding a new delivery user
+        new_uid = 999888777
+        self.assertFalse(is_delivery_user(new_uid))
+        success, _ = await add_authorized_user(new_uid, role="delivery")
+        self.assertTrue(success)
+        self.assertTrue(is_delivery_user(new_uid))
+        self.assertFalse(is_super_admin(new_uid))
+
+        # Test listing users
+        all_users = await get_all_authorized_users()
+        self.assertIn(1573531032, all_users["admin"])
+        self.assertIn(new_uid, all_users["delivery"])
+
+        # Test removing a delivery user
+        rem_success, _ = await remove_authorized_user(new_uid)
+        self.assertTrue(rem_success)
+        self.assertFalse(is_delivery_user(new_uid))
+
+        # Test protecting Super Admin from removal
+        sa_rem_success, msg = await remove_authorized_user(1573531032)
+        self.assertFalse(sa_rem_success)
+        self.assertTrue(is_super_admin(1573531032))
 
 
 class TestDuplicateOrderDetection(unittest.IsolatedAsyncioTestCase):

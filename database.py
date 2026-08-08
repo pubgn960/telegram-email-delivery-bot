@@ -2,8 +2,7 @@
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
 backup/restore, and detailed statistics dashboard.
-Includes global in-memory BOT_SETTINGS cache for high-performance zero-query message filtering
-and helper for duplicate order detection.
+Includes global in-memory BOT_SETTINGS and AUTH_USERS_CACHE for high-performance zero-query permission filtering.
 """
 
 import os
@@ -19,7 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import joinedload
 
 from config import Config
-from models import Base, Order, Image, Settings
+from models import Base, Order, Image, Settings, AuthorizedUser
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +45,9 @@ BOT_SETTINGS: Dict[str, Any] = {
     "delivery_group_title": None
 }
 
+# Global in-memory user permission cache: telegram_user_id -> role ('admin' or 'delivery')
+AUTH_USERS_CACHE: Dict[int, str] = {}
+
 
 async def dispose_engine() -> None:
     """Disposes active database engine connection pool."""
@@ -66,13 +68,14 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
 
 
 async def init_db() -> None:
-    """Initializes database schema and default Settings record."""
+    """Initializes database schema and default Settings and AuthorizedUsers records."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database initialized successfully.")
 
     await get_or_create_settings()
+    await reload_auth_users_cache()
 
 
 # ==========================================
@@ -255,6 +258,108 @@ async def reset_groups() -> Settings:
 
     await reload_bot_settings_cache()
     return await get_current_settings()
+
+
+# ==========================================
+# Role-Based User Management Operations
+# ==========================================
+
+async def reload_auth_users_cache() -> Dict[int, str]:
+    """
+    Loads AuthorizedUser records from database into global AUTH_USERS_CACHE in RAM.
+    Seeds default Super Admin (1573531032) and default Delivery Users (1078400998, 1858358195) if database table is empty.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(AuthorizedUser)
+        res = await session.execute(stmt)
+        users = list(res.scalars().all())
+
+        if not users:
+            logger.info("[AUTH] Table authorized_users is empty. Seeding default Super Admin and Delivery Users...")
+            default_seeds = [
+                (1573531032, "admin"),
+                (1078400998, "delivery"),
+                (1858358195, "delivery")
+            ]
+            for uid, role in default_seeds:
+                u = AuthorizedUser(
+                    telegram_user_id=uid,
+                    role=role,
+                    created_at=datetime.now(timezone.utc)
+                )
+                session.add(u)
+            await session.commit()
+
+            res = await session.execute(select(AuthorizedUser))
+            users = list(res.scalars().all())
+
+        AUTH_USERS_CACHE.clear()
+        for u in users:
+            AUTH_USERS_CACHE[u.telegram_user_id] = u.role
+
+    logger.info(f"[AUTH] Loaded {len(AUTH_USERS_CACHE)} authorized user(s) into memory.")
+    return AUTH_USERS_CACHE
+
+
+async def add_authorized_user(telegram_user_id: int, role: str = "delivery") -> Tuple[bool, str]:
+    """
+    Adds or updates an authorized user in the database and refreshes AUTH_USERS_CACHE.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(AuthorizedUser).where(AuthorizedUser.telegram_user_id == telegram_user_id)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+
+        if not user:
+            user = AuthorizedUser(
+                telegram_user_id=telegram_user_id,
+                role=role,
+                created_at=datetime.now(timezone.utc)
+            )
+            session.add(user)
+        else:
+            user.role = role
+
+        await session.commit()
+
+    await reload_auth_users_cache()
+    logger.info(f"[AUTH] Added/Updated user {telegram_user_id} with role '{role}'.")
+    return True, f"User {telegram_user_id} added with role '{role}'"
+
+
+async def remove_authorized_user(telegram_user_id: int) -> Tuple[bool, str]:
+    """
+    Removes an authorized user from the database and refreshes AUTH_USERS_CACHE.
+    Super Admin (1573531032) cannot be removed.
+    """
+    if telegram_user_id == 1573531032:
+        return False, "Super Admin (1573531032) cannot be removed."
+
+    async with AsyncSessionLocal() as session:
+        stmt = delete(AuthorizedUser).where(AuthorizedUser.telegram_user_id == telegram_user_id)
+        res = await session.execute(stmt)
+        await session.commit()
+        count = res.rowcount
+
+    await reload_auth_users_cache()
+    if count > 0:
+        logger.info(f"[AUTH] Removed user {telegram_user_id}.")
+        return True, f"User {telegram_user_id} removed."
+    return False, f"User {telegram_user_id} not found."
+
+
+async def get_all_authorized_users() -> Dict[str, List[int]]:
+    """Returns lists of user IDs grouped by role ('admin', 'delivery')."""
+    admins: List[int] = []
+    delivery_users: List[int] = []
+
+    for uid, role in AUTH_USERS_CACHE.items():
+        if role == "admin":
+            admins.append(uid)
+        elif role == "delivery":
+            delivery_users.append(uid)
+
+    return {"admin": admins, "delivery": delivery_users}
 
 
 # ==========================================

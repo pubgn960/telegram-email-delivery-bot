@@ -1,7 +1,7 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
 Initializes database, configures handlers, sets Telegram '/' UI command menu,
-populates global in-memory BOT_SETTINGS cache on startup, starts background tasks, and runs bot polling.
+populates global in-memory BOT_SETTINGS and AUTH_USERS_CACHE on startup, starts background tasks, and runs bot polling.
 """
 
 import sys
@@ -18,13 +18,15 @@ from telegram.ext import (
 )
 
 from config import Config
-from database import init_db, cleanup_old_records, check_order_timeouts, reload_bot_settings_cache
+from database import init_db, cleanup_old_records, check_order_timeouts, reload_bot_settings_cache, reload_auth_users_cache
 from utils import setup_logging
 from handlers import (
     source_group_handler,
     edited_message_handler,
     delivery_group_handler,
     duplicate_order_callback_handler,
+    user_command,
+    users_command,
     start_command,
     help_command,
     find_command,
@@ -77,8 +79,9 @@ async def post_init(application: Application) -> None:
     logger.info("Initializing database schema...")
     await init_db()
 
-    # Load Settings from DB once on startup and populate in-memory BOT_SETTINGS cache
+    # Load Settings & Authorized Users from DB once on startup and populate in-memory caches
     await reload_bot_settings_cache()
+    await reload_auth_users_cache()
 
     # Register Bot Commands list so Telegram displays them in the interactive '/' popup menu
     commands = [
@@ -86,6 +89,8 @@ async def post_init(application: Application) -> None:
         BotCommand("delivery", "Mark current group as Loader Group"),
         BotCommand("groups", "Show group configuration status"),
         BotCommand("status", "View bot status & diagnostics"),
+        BotCommand("user", "Manage delivery users"),
+        BotCommand("users", "List all authorized users"),
         BotCommand("setup", "View setup guide"),
         BotCommand("pending", "List pending orders"),
         BotCommand("delivered", "List latest delivered orders"),
@@ -146,6 +151,10 @@ def main() -> None:
     application.add_handler(CommandHandler("removesource", removesource_command))
     application.add_handler(CommandHandler("removedelivery", removedelivery_command))
     application.add_handler(CommandHandler("resetgroups", resetgroups_command))
+
+    # Register User Management Commands
+    application.add_handler(CommandHandler("user", user_command))
+    application.add_handler(CommandHandler("users", users_command))
 
     # Register Core & New Admin Commands
     application.add_handler(CommandHandler("start", start_command))

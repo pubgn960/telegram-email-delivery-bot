@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-08-09
+
+### Added & Changed
+- **Role-Based User Management (`authorized_users`)**:
+  - Implemented `AuthorizedUser` model and `authorized_users` database table storing user IDs, roles (`'admin'` or `'delivery'`), and timestamps.
+  - Pre-loaded authorized users into RAM (`AUTH_USERS_CACHE`) on bot startup during `post_init()`.
+  - Super Admin (`1573531032`) has full access to all commands, configuration, database management, statistics, and user management.
+  - Seeded default Delivery Users (`1078400998`, `1858358195`).
+- **New Super Admin Commands**:
+  - `/user delivery add <telegram_user_id>`: Adds a delivery user.
+  - `/user delivery remove <telegram_user_id>`: Removes a delivery user.
+  - `/users`: Displays list of Super Admins and Delivery Users.
+- **Permission Rules & Security**:
+  - Delivery Users are restricted strictly to the Loader Group workflow (replying to orders and uploading images).
+  - Attempting to run admin commands when unauthorized triggers: `⛔ You are not authorized to use this command.`
+  - Attempting to deliver orders when unauthorized triggers: `⛔ You are not authorized to deliver orders.`
+
 ## [1.11.0] - 2026-08-09
 
 ### Added & Changed
@@ -13,19 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.10.0] - 2026-08-09
 
 ### Added & Changed
-- **Duplicate Order Prompt & Confirmation**: When a customer submits an order in the Client Group while a previous order for the same email is still pending, the bot sends an interactive inline prompt (`⚠️ Duplicate Order Detected`).
+- **Duplicate Order Prompt & Confirmation**: Interactive inline keyboard prompt (`⚠️ Duplicate Order Detected`) when a customer submits duplicate pending orders.
 
 ## [1.9.0] - 2026-08-08
 
 ### Added & Changed
-- **Email as First Image Album Caption**: When delivering image albums to the customer in the Client Group, the email address is set as the caption of the **FIRST image** in the album. No separate text message is sent afterward.
+- **Email as First Image Album Caption**: Email address set as caption of the **FIRST image** in delivered albums. No separate text message afterward.
 
 ## [1.8.0] - 2026-08-08
 
 ### Added & Changed
 - **Removed Delivery Summary Card**: Removed extra completion summary card.
 - **Caption Email Override**: Support for extracting email overrides from Loader reply captions.
-- **Wrong Details Workflow**: Support for Loader text reply `wrong` to notify customer (`❌ Please check and correct your details, then send them again.`).
+- **Wrong Details Workflow**: Support for Loader text reply `wrong` to notify customer.
 
 ## [1.7.0] - 2026-08-08
 

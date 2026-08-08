@@ -1,6 +1,7 @@
 """
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
-Defines schemas and indexes for Orders, Images, and Settings tables supporting two-group reply-based workflow.
+Defines schemas and indexes for Orders, Images, Settings, and AuthorizedUsers tables
+supporting two-group reply-based workflow and role-based user management.
 """
 
 from datetime import datetime, timezone
@@ -38,6 +39,27 @@ class Settings(Base):
 
     def __repr__(self) -> str:
         return f"<Settings(id={self.id}, client_group={self.source_group_id}, loader_group={self.delivery_group_id})>"
+
+
+class AuthorizedUser(Base):
+    """
+    Stores authorized users and their roles for permission enforcement.
+    roles: 'admin' (Super Admin), 'delivery' (Delivery User)
+    """
+
+    __tablename__ = "authorized_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="delivery")  # 'admin' or 'delivery'
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<AuthorizedUser(id={self.id}, user_id={self.telegram_user_id}, role='{self.role}')>"
 
 
 class Order(Base):

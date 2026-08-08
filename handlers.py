@@ -2,9 +2,10 @@
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
-Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling, Telegram Reactions, and Admin Commands.
-Utilizes global BOT_SETTINGS cache for zero-database-query message filtering.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
+Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
+Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
+Utilizes global BOT_SETTINGS and AUTH_USERS_CACHE for zero-database-query filtering.
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH]).
 """
 
 import io
@@ -26,6 +27,7 @@ from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
     BOT_SETTINGS,
+    AUTH_USERS_CACHE,
     AsyncSessionLocal,
     get_current_settings,
     update_source_group,
@@ -47,11 +49,16 @@ from database import (
     export_orders_to_csv,
     get_db_file_path,
     dispose_engine,
-    init_db
+    init_db,
+    add_authorized_user,
+    remove_authorized_user,
+    get_all_authorized_users
 )
 from utils import (
     check_admin_permission,
     is_admin,
+    is_super_admin,
+    is_delivery_user,
     safe_set_message_reaction,
     get_uptime_str,
     get_memory_usage_mb,
@@ -298,11 +305,13 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     """
     Monitors messages in Group 2 (Loader Group).
     Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
+    Enforces Role-Based Permission Check (User must have 'delivery' or 'admin' role).
     Validates that incoming text or media is sent strictly as a reply to a valid bot Order Message.
     Supports Wrong Details Workflow ('wrong' text reply) and Caption Email Overrides.
     """
     message = update.effective_message
     chat = update.effective_chat
+    user = update.effective_user
 
     if not message or not chat:
         return
@@ -317,6 +326,16 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     # Must match configured Loader Group
     if chat.id != configured_loader_id:
         logger.debug(f"[LOADER] Ignored message in chat {chat.id} ({chat.title}); configured Loader Group ID is {configured_loader_id}.")
+        return
+
+    # Role-Based Permission Check for Delivery Users
+    user_id = user.id if user else None
+    if not is_delivery_user(user_id):
+        logger.warning(f"[LOADER] Unauthorized user {user_id} attempted to deliver order in Loader Group.")
+        try:
+            await message.reply_text("⛔ You are not authorized to deliver orders.")
+        except Exception as e:
+            logger.error(f"[LOADER] Failed to send unauthorized delivery error notice: {e}")
         return
 
     reply_to = message.reply_to_message
@@ -433,6 +452,84 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ==========================================
+# Role-Based User Management Commands
+# ==========================================
+
+async def user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles /user delivery add <user_id> and /user delivery remove <user_id> commands (Super Admin only).
+    """
+    if not await check_admin_permission(update):
+        return
+
+    args = context.args or []
+
+    if len(args) == 3 and args[0].lower() == "delivery":
+        sub_action = args[1].lower()
+        target_uid_str = args[2].strip()
+
+        if not target_uid_str.isdigit():
+            await update.effective_message.reply_text("❌ Invalid Telegram User ID. Must be numeric.", parse_mode="HTML")
+            return
+
+        target_uid = int(target_uid_str)
+
+        if sub_action == "add":
+            success, msg = await add_authorized_user(target_uid, role="delivery")
+            reply = (
+                f"✅ Delivery user added successfully.\n\n"
+                f"User ID:\n{target_uid}"
+            )
+            await update.effective_message.reply_text(reply)
+            return
+
+        elif sub_action == "remove":
+            success, msg = await remove_authorized_user(target_uid)
+            if success:
+                reply = (
+                    f"✅ Delivery user removed successfully.\n\n"
+                    f"User ID:\n{target_uid}"
+                )
+            else:
+                reply = f"❌ {msg}"
+            await update.effective_message.reply_text(reply)
+            return
+
+    usage_msg = (
+        "🛠 <b>User Management Usage</b>\n\n"
+        "• <code>/user delivery add 123456789</code>\n"
+        "• <code>/user delivery remove 123456789</code>\n"
+        "• <code>/users</code> - List all authorized users"
+    )
+    await update.effective_message.reply_text(usage_msg, parse_mode="HTML")
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles /users command listing Super Admin and Delivery Users (Super Admin only).
+    """
+    if not await check_admin_permission(update):
+        return
+
+    user_groups = await get_all_authorized_users()
+    admins = user_groups.get("admin", [1573531032])
+    delivery_users = user_groups.get("delivery", [])
+
+    lines = ["👑 Super Admin\n"]
+    for a in admins:
+        lines.append(f"{a}")
+
+    lines.append("\n📦 Delivery Users\n")
+    if delivery_users:
+        for d in delivery_users:
+            lines.append(f"{d}")
+    else:
+        lines.append("None")
+
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+# ==========================================
 # Self-Configuring Commands & Validation
 # ==========================================
 
@@ -441,9 +538,9 @@ async def verify_admin_and_group(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
     user = update.effective_user
 
-    if not is_admin(user.id if user else None):
+    if not is_super_admin(user.id if user else None):
         if update.effective_message:
-            await update.effective_message.reply_text("⛔ Access Denied. Restricted to authorized bot administrators.")
+            await update.effective_message.reply_text("⛔ You are not authorized to use this command.")
         return False
 
     if not chat or chat.type not in ("group", "supergroup"):
@@ -946,6 +1043,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• <code>/resetgroups</code> - Reset all group settings\n"
         "• <code>/status</code> - Display bot status\n"
         "• <code>/setup</code> - View setup guide\n\n"
+        "<b>User Management:</b>\n"
+        "• <code>/user delivery add &lt;id&gt;</code> - Add Delivery User\n"
+        "• <code>/user delivery remove &lt;id&gt;</code> - Remove Delivery User\n"
+        "• <code>/users</code> - List all authorized users\n\n"
         "<b>Order & Data Management:</b>\n"
         "• <code>/pending</code> - List pending orders\n"
         "• <code>/delivered</code> - List latest delivered orders\n"

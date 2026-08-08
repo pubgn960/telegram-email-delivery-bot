@@ -1,5 +1,5 @@
 """
-Utility functions for security, permission checking, reaction handling, system metrics, logging setup, and formatting.
+Utility functions for security, role-based permission checking, reaction handling, system metrics, logging setup, and formatting.
 """
 
 import os
@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 from telegram import Update, Bot, ReactionTypeEmoji
 from config import Config
+from database import AUTH_USERS_CACHE
 
 logger = logging.getLogger(__name__)
 
@@ -31,46 +32,72 @@ def setup_logging(level: int = logging.INFO) -> None:
     logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
 
 
-def is_admin(user_id: Optional[int]) -> bool:
+def is_super_admin(user_id: Optional[int]) -> bool:
     """
-    Verifies if a user is an authorized administrator.
+    Verifies if a user has Super Admin role ('admin').
+    User ID 1573531032 is always Super Admin.
 
     Args:
         user_id (Optional[int]): Telegram User ID.
 
     Returns:
-        bool: True if authorized, False otherwise.
+        bool: True if Super Admin, False otherwise.
     """
     if not user_id:
         return False
 
-    if not Config.ADMIN_IDS:
-        logger.warning(f"No ADMIN_IDS configured in environment! Authorizing user {user_id} by default.")
+    if user_id == 1573531032:
         return True
 
-    return user_id in Config.ADMIN_IDS
+    return AUTH_USERS_CACHE.get(user_id) == "admin"
+
+
+def is_delivery_user(user_id: Optional[int]) -> bool:
+    """
+    Verifies if a user is authorized for delivery ('delivery' or 'admin').
+    Default seeds: 1573531032 (Admin), 1078400998 (Delivery), 1858358195 (Delivery).
+
+    Args:
+        user_id (Optional[int]): Telegram User ID.
+
+    Returns:
+        bool: True if authorized for delivery, False otherwise.
+    """
+    if not user_id:
+        return False
+
+    if user_id in (1573531032, 1078400998, 1858358195):
+        return True
+
+    return AUTH_USERS_CACHE.get(user_id) in ("admin", "delivery")
+
+
+def is_admin(user_id: Optional[int]) -> bool:
+    """Backward-compatible alias for is_super_admin."""
+    return is_super_admin(user_id)
 
 
 async def check_admin_permission(update: Update) -> bool:
     """
-    Verifies admin access for command updates. Sends access denied response if unauthorized.
+    Verifies Super Admin access for command updates.
+    Sends ⛔ You are not authorized to use this command. if unauthorized.
 
     Args:
         update (Update): Telegram Update object.
 
     Returns:
-        bool: True if user is authorized admin, False otherwise.
+        bool: True if user is authorized Super Admin, False otherwise.
     """
     user = update.effective_user
     user_id = user.id if user else None
 
-    if is_admin(user_id):
+    if is_super_admin(user_id):
         return True
 
     logger.warning(f"Unauthorized command access attempt by user_id: {user_id}")
     if update.effective_message:
         await update.effective_message.reply_text(
-            "⛔ Access Denied. This command is restricted to bot administrators."
+            "⛔ You are not authorized to use this command."
         )
     return False
 
