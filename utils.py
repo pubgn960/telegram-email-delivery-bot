@@ -79,13 +79,14 @@ async def safe_set_message_reaction(
     bot: Bot,
     chat_id: Optional[int],
     message_id: Optional[int],
-    emoji: str = "📥",
-    fallback_emoji: Optional[str] = "✅"
+    emoji: str = "👍",
+    fallback_emoji: Optional[str] = None,
+    log_tag: str = "[REACTION]"
 ) -> bool:
     """
     Safely sets a Telegram reaction emoji on a message.
-    Gracefully falls back if primary reaction fails or if reactions are unsupported/disabled in chat.
-    Never crashes. Logs 'Reaction not supported' on failure.
+    Gracefully handles cases where reactions are disabled in chat or unsupported by API.
+    Never stops the workflow. Logs 'Reaction not supported' on failure.
     """
     if not chat_id or not message_id:
         return False
@@ -97,10 +98,9 @@ async def safe_set_message_reaction(
             message_id=message_id,
             reaction=[ReactionTypeEmoji(emoji=emoji)]
         )
-        logger.info(f"Reaction Added | Emoji '{emoji}' on Msg ID {message_id} in Chat {chat_id}")
         return True
     except Exception as e:
-        logger.debug(f"Reaction '{emoji}' via ReactionTypeEmoji failed: {e}. Trying string list...")
+        logger.debug(f"Reaction '{emoji}' via ReactionTypeEmoji failed: {e}. Trying raw string list...")
 
     try:
         await bot.set_message_reaction(
@@ -108,12 +108,11 @@ async def safe_set_message_reaction(
             message_id=message_id,
             reaction=[emoji]
         )
-        logger.info(f"Reaction Added | Emoji '{emoji}' on Msg ID {message_id} in Chat {chat_id}")
         return True
     except Exception as e:
-        logger.warning(f"Reaction not supported for emoji '{emoji}': {e}")
+        logger.warning(f"Reaction not supported: {e}")
 
-    # Fallback emoji attempt
+    # Fallback emoji attempt if specified
     if fallback_emoji:
         try:
             await bot.set_message_reaction(
@@ -121,7 +120,6 @@ async def safe_set_message_reaction(
                 message_id=message_id,
                 reaction=[ReactionTypeEmoji(emoji=fallback_emoji)]
             )
-            logger.info(f"Reaction Added (Fallback) | Emoji '{fallback_emoji}' on Msg ID {message_id} in Chat {chat_id}")
             return True
         except Exception:
             pass
@@ -132,10 +130,9 @@ async def safe_set_message_reaction(
                 message_id=message_id,
                 reaction=[fallback_emoji]
             )
-            logger.info(f"Reaction Added (Fallback) | Emoji '{fallback_emoji}' on Msg ID {message_id} in Chat {chat_id}")
             return True
-        except Exception as e:
-            logger.warning(f"Reaction not supported for fallback '{fallback_emoji}': {e}")
+        except Exception as e2:
+            logger.warning(f"Reaction not supported: {e2}")
 
     return False
 

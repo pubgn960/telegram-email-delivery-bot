@@ -1,7 +1,7 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (No Customer Names exposed),
-Telegram Reaction handling (📥 order received, ❤️ delivery completed), and Admin Commands.
+Telegram Reaction handling (👍 order received, ❤️ delivery completed), and Admin Commands.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION]).
 """
 
@@ -65,7 +65,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     When a customer sends an order message containing an email:
     1. Registers new Order in DB with status 'Pending'.
     2. Formats and forwards Order Notification message to Group 2 (Loader Group) - Privacy Protected (No Customer Names).
-    3. Adds 📥 (or ✅) reaction to original customer order message.
+    3. Adds 👍 reaction to original customer order message.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -137,18 +137,19 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
 
-    # 4. Add 📥 (fallback ✅) reaction to ORIGINAL customer order message
+    # 4. Add 👍 reaction to ORIGINAL customer order message
     reacted = await safe_set_message_reaction(
         bot=context.bot,
         chat_id=chat.id,
         message_id=message.message_id,
-        emoji="📥",
-        fallback_emoji="✅"
+        emoji="👍",
+        fallback_emoji=None,
+        log_tag="[REACTION]"
     )
     if reacted:
-        logger.info(f"[REACTION] Client reaction added ('📥') to customer Order #{order.id} (Msg ID: {message.message_id})")
+        logger.info("[REACTION] 👍 Order received")
     else:
-        logger.warning(f"[REACTION] Failed to add client reaction to Order #{order.id} (Msg ID: {message.message_id})")
+        logger.warning("Reaction not supported.")
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

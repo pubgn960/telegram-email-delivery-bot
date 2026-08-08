@@ -225,12 +225,13 @@ async def deliver_order_by_id(
             chat_id=client_chat_id,
             message_id=order.original_message_id,
             emoji="❤️",
-            fallback_emoji="✅"
+            fallback_emoji=None,
+            log_tag="[REACTION]"
         )
         if cust_reacted:
-            logger.info(f"[REACTION] Client reaction added ('❤️') on original customer Order #{order.id} in Client Group {client_chat_id}")
+            logger.info("[REACTION] ❤️ Customer delivery completed")
         else:
-            logger.warning(f"[REACTION] Failed to add client reaction ('❤️') on Order #{order.id} in Client Group {client_chat_id}")
+            logger.warning("Reaction not supported.")
 
     # 5. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
     target_loader_msg_id = loader_reply_msg_id or order.loader_message_id
@@ -240,12 +241,13 @@ async def deliver_order_by_id(
             chat_id=loader_group_id,
             message_id=target_loader_msg_id,
             emoji="❤️",
-            fallback_emoji="✅"
+            fallback_emoji=None,
+            log_tag="[REACTION]"
         )
         if loader_reacted:
-            logger.info(f"[REACTION] Loader reaction added ('❤️') on Loader delivery message for Order #{order.id} in Loader Group {loader_group_id}")
+            logger.info("[REACTION] ❤️ Loader delivery")
         else:
-            logger.warning(f"[REACTION] Failed to add loader reaction ('❤️') on Order #{order.id} in Loader Group {loader_group_id}")
+            logger.warning("Reaction not supported.")
 
         # Send confirmation message to Loader Group
         loader_notice = (
