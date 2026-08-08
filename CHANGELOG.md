@@ -5,11 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-08-08
+
+### Added & Changed
+- **Email as First Image Album Caption**: When delivering image albums to the customer in the Client Group:
+  - If the Loader's reply caption contains valid email addresses, `extract_last_email()` extracts the last valid email and sets it as the caption of the **FIRST image** in the album.
+  - If no email is present in the Loader caption, the original order email from the database (`order.email`) is set as the caption of the **FIRST image**.
+  - All remaining images in the album have no caption.
+  - No separate text message or delivery summary card is sent to the customer afterward.
+
 ## [1.8.0] - 2026-08-08
 
 ### Added & Changed
 - **Removed Delivery Summary Card**: Removed the extra completion summary card (`📧 Email ... 📦 Order ID ... ✅ Delivery Completed`) sent after image delivery. Customers receive only images/album and caption email override (if present).
-- **Caption Email Override**: If the Loader's reply text/caption contains valid email addresses, `extract_last_email()` extracts the last valid email and sends **ONLY** that email address as a text message to the customer (replying to the original customer message). Non-email caption text (e.g. `AG Done`, `Completed`) is ignored. Database email remains unchanged.
+- **Caption Email Override**: If the Loader's reply text/caption contains valid email addresses, `extract_last_email()` extracts the last valid email.
 - **Wrong Details Workflow**: When the Loader replies to an order with text or caption containing the word `wrong` (case-insensitive):
   - Sends `❌ Please check and correct your details, then send them again.` to the customer in the Client Group (replying to customer's order).
   - Reacts to the Loader's message with `❌` (fallback `⚠️`).

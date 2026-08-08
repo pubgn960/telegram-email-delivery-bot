@@ -1,7 +1,7 @@
 """
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
-dispatching image albums to the Client Group, caption email overrides, Telegram API retries,
-database status updates, Loader confirmations, and Telegram reactions.
+dispatching image albums to the Client Group with Email as First Image Caption,
+Telegram API retries, database status updates, Loader confirmations, and Telegram reactions.
 Includes structured logging tags ([DELIVERY], [REACTION]).
 """
 
@@ -83,7 +83,8 @@ async def deliver_order_by_id(
     caption_text: Optional[str] = None
 ) -> bool:
     """
-    Delivers stored image albums for an order to the Client Group, sends caption email override if present,
+    Delivers stored image albums for an order to the Client Group, placing Email as the caption
+    of the FIRST image in the album (no separate text message or summary card sent),
     adds ❤️ reactions to original customer message and loader delivery message, and notifies Loader Group.
 
     Args:
@@ -160,7 +161,11 @@ async def deliver_order_by_id(
     all_images: List[Image] = list(order.images)
     total_images = len(all_images)
 
-    logger.info(f"[DELIVERY] Delivering Order #{order_id} ({total_images} images) to Client Group {client_chat_id}")
+    # Determine Email for First Image Caption: extract last email from loader caption or fallback to DB order.email
+    caption_email = extract_last_email(caption_text)
+    email_for_caption = caption_email if caption_email else order.email
+
+    logger.info(f"[DELIVERY] Delivering Order #{order_id} ({total_images} images, caption email: '{email_for_caption}') to Client Group {client_chat_id}")
 
     # 1. Dispatch image albums to Client Group in batches of max 10 items (grouped by file_type)
     grouped_batches: List[List[Image]] = []
@@ -181,11 +186,14 @@ async def deliver_order_by_id(
     delivered_count = 0
     for idx, batch in enumerate(grouped_batches):
         media_group: List[MediaUnion] = []
-        for img in batch:
+        for b_idx, img in enumerate(batch):
+            # Only the FIRST image of the FIRST batch gets the email as caption
+            item_caption = email_for_caption if (idx == 0 and b_idx == 0) else None
+
             if img.file_type == "document":
-                media_group.append(InputMediaDocument(media=img.telegram_file_id))
+                media_group.append(InputMediaDocument(media=img.telegram_file_id, caption=item_caption))
             else:
-                media_group.append(InputMediaPhoto(media=img.telegram_file_id))
+                media_group.append(InputMediaPhoto(media=img.telegram_file_id, caption=item_caption))
 
         if idx > 0:
             await asyncio.sleep(1.0)
@@ -199,25 +207,12 @@ async def deliver_order_by_id(
         if sent:
             delivered_count += len(batch)
 
-    # 2. Caption Email Override Handling (Send ONLY the last valid email if loader caption contains one)
-    caption_email = extract_last_email(caption_text)
-    if caption_email:
-        try:
-            await bot.send_message(
-                chat_id=client_chat_id,
-                text=caption_email,
-                reply_to_message_id=order.original_message_id
-            )
-            logger.info(f"[DELIVERY] Sent caption email override message '{caption_email}' to Client Group.")
-        except Exception as e:
-            logger.error(f"[DELIVERY] Failed to send caption email message to Client Group: {e}")
-
-    # 3. Mark order status as Delivered in DB
+    # 2. Mark order status as Delivered in DB
     updated_order = await mark_order_delivered(order.id)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     logger.info(f"[DELIVERY] Images sent | Order #{order.id} ({delivered_count}/{total_images} images) delivered to Client Group {client_chat_id}.")
 
-    # 4. Reaction On Customer Order (Add ❤️ reaction to original customer order message in Client Group)
+    # 3. Reaction On Customer Order (Add ❤️ reaction to original customer order message in Client Group)
     if order.original_message_id and client_chat_id:
         cust_reacted = await safe_set_message_reaction(
             bot=bot,
@@ -232,7 +227,7 @@ async def deliver_order_by_id(
         else:
             logger.warning("Reaction not supported.")
 
-    # 5. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
+    # 4. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
     target_loader_msg_id = loader_reply_msg_id or order.loader_message_id
     if loader_group_id and target_loader_msg_id:
         loader_reacted = await safe_set_message_reaction(
@@ -265,7 +260,7 @@ async def deliver_order_by_id(
         except Exception as e:
             logger.error(f"[DELIVERY] Failed to send loader delivery confirmation: {e}")
 
-    # 6. Optional post-delivery cleanup
+    # 5. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:
         logger.info(f"DELETE_AFTER_DELIVERY enabled. Purging order #{order.id} for email: '{order.email}'")
         await delete_orders_by_email(order.email)
