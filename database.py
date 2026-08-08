@@ -94,12 +94,16 @@ async def get_or_create_settings() -> Settings:
 
 
 async def get_current_settings() -> Settings:
-    """Retrieves current Settings record from database."""
+    """Retrieves current Settings record directly from database."""
     return await get_or_create_settings()
 
 
 async def update_source_group(chat_id: int, title: str) -> Settings:
-    """Updates the Source Group (Client Group) configuration in database."""
+    """
+    Updates the Source Group (Client Group) configuration in database,
+    ensuring exactly one Settings record exists, committing to DB, and reloading.
+    """
+    logger.info(f"[SOURCE] Saving Source Group...")
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -121,13 +125,21 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
             settings.updated_at = datetime.now(timezone.utc)
 
         await session.commit()
-        await session.refresh(settings)
-        logger.info(f"Client Group updated in DB: ID={chat_id}, Title='{title}'")
-        return settings
+        logger.info("[SOURCE] Database commit successful.")
+
+    # Reload directly from database to verify persistence
+    reloaded_settings = await get_current_settings()
+    logger.info(f"[SOURCE] Source Group saved: {reloaded_settings.source_group_id}")
+    logger.info(f"[SOURCE] Reload successful.")
+    return reloaded_settings
 
 
 async def update_delivery_group(chat_id: int, title: str) -> Settings:
-    """Updates the Delivery Group (Loader Group) configuration in database."""
+    """
+    Updates the Delivery Group (Loader Group) configuration in database,
+    ensuring exactly one Settings record exists, committing to DB, and reloading.
+    """
+    logger.info(f"[DELIVERY_GROUP] Saving Delivery Group...")
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -149,9 +161,13 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
             settings.updated_at = datetime.now(timezone.utc)
 
         await session.commit()
-        await session.refresh(settings)
-        logger.info(f"Loader Group updated in DB: ID={chat_id}, Title='{title}'")
-        return settings
+        logger.info("[DELIVERY_GROUP] Database commit successful.")
+
+    # Reload directly from database to verify persistence
+    reloaded_settings = await get_current_settings()
+    logger.info(f"[DELIVERY_GROUP] Delivery Group saved: {reloaded_settings.delivery_group_id}")
+    logger.info(f"[DELIVERY_GROUP] Reload successful.")
+    return reloaded_settings
 
 
 async def remove_source_group() -> Settings:
@@ -166,8 +182,8 @@ async def remove_source_group() -> Settings:
             settings.source_group_title = None
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
-            await session.refresh(settings)
-        return settings or await get_or_create_settings()
+
+    return await get_current_settings()
 
 
 async def remove_delivery_group() -> Settings:
@@ -182,8 +198,8 @@ async def remove_delivery_group() -> Settings:
             settings.delivery_group_title = None
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
-            await session.refresh(settings)
-        return settings or await get_or_create_settings()
+
+    return await get_current_settings()
 
 
 async def reset_groups() -> Settings:
@@ -200,8 +216,8 @@ async def reset_groups() -> Settings:
             settings.delivery_group_title = None
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
-            await session.refresh(settings)
-        return settings or await get_or_create_settings()
+
+    return await get_current_settings()
 
 
 # ==========================================

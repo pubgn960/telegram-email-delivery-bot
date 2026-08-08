@@ -303,10 +303,8 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat = update.effective_chat
     group_name = chat.title or "Client Group"
 
-    logger.info(f"[SOURCE] Saving Source Group: {chat.id}")
+    logger.info(f"[SOURCE] Command received in chat: {chat.id}")
     settings = await update_source_group(chat.id, group_name)
-    logger.info("[SOURCE] Database updated successfully.")
-    logger.info(f"[SOURCE] Loaded Source Group: {settings.source_group_id}")
 
     title_escaped = html.escape(settings.source_group_title or group_name)
 
@@ -329,10 +327,8 @@ async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat = update.effective_chat
     group_name = chat.title or "Loader Group"
 
-    logger.info(f"[DELIVERY_GROUP] Saving Delivery Group: {chat.id}")
+    logger.info(f"[DELIVERY_GROUP] Command received in chat: {chat.id}")
     settings = await update_delivery_group(chat.id, group_name)
-    logger.info("[DELIVERY_GROUP] Database updated successfully.")
-    logger.info(f"[DELIVERY_GROUP] Loaded Delivery Group: {settings.delivery_group_id}")
 
     title_escaped = html.escape(settings.delivery_group_title or group_name)
 
