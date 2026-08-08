@@ -72,7 +72,7 @@ async def init_db() -> None:
 async def get_or_create_settings() -> Settings:
     """
     Retrieves or initializes the single Settings record (id=1).
-    Initializes from Config / .env if created for the first time.
+    All group IDs default to None until configured from Telegram via /source or /delivery.
     """
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
@@ -81,14 +81,12 @@ async def get_or_create_settings() -> Settings:
 
         if not settings:
             async with session.begin():
-                init_source = Config.SOURCE_GROUP_ID if Config.SOURCE_GROUP_ID != 0 else None
-                init_delivery = Config.DELIVERY_GROUP_ID if Config.DELIVERY_GROUP_ID != 0 else None
                 settings = Settings(
                     id=1,
-                    source_group_id=init_source,
-                    source_group_title="Default Source Group" if init_source else None,
-                    delivery_group_id=init_delivery,
-                    delivery_group_title="Default Delivery Group" if init_delivery else None,
+                    source_group_id=None,
+                    source_group_title=None,
+                    delivery_group_id=None,
+                    delivery_group_title=None,
                     updated_at=datetime.now(timezone.utc)
                 )
                 session.add(settings)

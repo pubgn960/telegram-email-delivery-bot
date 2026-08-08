@@ -1,6 +1,7 @@
 """
 Configuration management for Telegram Email Image Delivery Bot.
-Provides safe environment variable parsing, validation, and database URL adaptation.
+Only 3 core environment variables are required: BOT_TOKEN, ADMIN_IDS, and DATABASE_URL.
+Group configurations are managed dynamically via Telegram commands (/source and /delivery) and stored in DB.
 """
 
 import os
@@ -40,17 +41,10 @@ def safe_float(env_name: str, default: float) -> float:
 class Config:
     """Validated Application Configuration."""
 
+    # Core Required Environment Variables
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
-
-    # Telegram Group Chat IDs
-    SOURCE_GROUP_ID: int = safe_int("SOURCE_GROUP_ID", 0)
-    DELIVERY_GROUP_ID: int = safe_int("DELIVERY_GROUP_ID", 0)
-
-    # Admin User IDs
     RAW_ADMIN_IDS: str = os.getenv("ADMIN_IDS", "")
     ADMIN_IDS: Set[int] = set()
-
-    # Database URL
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
 
     # Media Group Debounce Window (seconds)
@@ -72,10 +66,7 @@ class Config:
     @classmethod
     def load_and_validate(cls) -> None:
         """Parses and validates environment settings."""
-        # Refresh values
         cls.BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-        cls.SOURCE_GROUP_ID = safe_int("SOURCE_GROUP_ID", 0)
-        cls.DELIVERY_GROUP_ID = safe_int("DELIVERY_GROUP_ID", 0)
         cls.RAW_ADMIN_IDS = os.getenv("ADMIN_IDS", "")
         cls.DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
         cls.MEDIA_GROUP_TIMEOUT = safe_float("MEDIA_GROUP_TIMEOUT", 2.0)

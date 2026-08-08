@@ -1,6 +1,7 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
-Includes dynamic DB-backed group monitoring, setup wizard, group management, and admin commands.
+Includes self-configuring group management (/source, /delivery, /groups, /resetgroups, /status)
+with strict admin and bot permission validation.
 """
 
 import io
@@ -35,6 +36,7 @@ from database import (
 )
 from utils import (
     check_admin_permission,
+    is_admin,
     get_uptime_str,
     get_memory_usage_mb,
     is_railway_environment,
@@ -45,13 +47,13 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Group Message Handlers (Dynamic DB Lookup)
+# Group Message Handlers (Pure Dynamic DB Routing)
 # ==========================================
 
 async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in the Source Group.
-    Dynamically checks the Source Group ID from database settings on every message.
+    Reads current Source Group ID dynamically from database.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -64,11 +66,12 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     settings = await get_current_settings()
     configured_source_id = settings.source_group_id
 
-    # If Source Group ID is set in DB, enforce chat ID match
-    if configured_source_id and chat.id != configured_source_id:
+    # If no Source Group configured yet, ignore message
+    if not configured_source_id:
         return
-    # Fallback to Config env if DB is unconfigured but env is set
-    elif not configured_source_id and Config.SOURCE_GROUP_ID != 0 and chat.id != Config.SOURCE_GROUP_ID:
+
+    # Enforce chat ID match against configured Source Group
+    if chat.id != configured_source_id:
         return
 
     text_content = message.text or message.caption or ""
@@ -85,7 +88,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in the Delivery Group.
-    Dynamically checks the Delivery Group ID from database settings on every message.
+    Reads current Delivery Group ID dynamically from database.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -97,11 +100,12 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     settings = await get_current_settings()
     configured_delivery_id = settings.delivery_group_id
 
-    # If Delivery Group ID is set in DB, enforce chat ID match
-    if configured_delivery_id and chat.id != configured_delivery_id:
+    # If no Delivery Group configured yet, ignore message
+    if not configured_delivery_id:
         return
-    # Fallback to Config env if DB is unconfigured but env is set
-    elif not configured_delivery_id and Config.DELIVERY_GROUP_ID != 0 and chat.id != Config.DELIVERY_GROUP_ID:
+
+    # Enforce chat ID match against configured Delivery Group
+    if chat.id != configured_delivery_id:
         return
 
     text_content = message.text or message.caption or ""
@@ -120,123 +124,89 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ==========================================
-# Dynamic Setup Wizard & Group Commands
+# Self-Configuring Commands & Validation
 # ==========================================
 
-async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def verify_admin_and_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Handles /setup command. Displays dynamic environment, permissions, and setup status checklist.
+    Helper function to validate:
+    1. User is authorized bot admin (listed in ADMIN_IDS).
+    2. Chat is a Group or Supergroup.
+    3. Bot is an Administrator in the group.
     """
-    if not await check_admin_permission(update):
-        return
-
     chat = update.effective_chat
-    bot_member = None
-    if chat and chat.type in ("group", "supergroup"):
-        try:
-            bot_member = await chat.get_member(context.bot.id)
-        except Exception:
-            pass
+    user = update.effective_user
 
-    # Check permissions
-    is_bot_admin = bot_member.status in ("administrator", "creator") if bot_member else True
-    can_send = True
+    # 1. User authorization check
+    if not is_admin(user.id if user else None):
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔ Access Denied. Restricted to authorized bot administrators.")
+        return False
 
-    # Database connection test
-    db_ok = True
+    # 2. Chat type check
+    if not chat or chat.type not in ("group", "supergroup"):
+        if update.effective_message:
+            await update.effective_message.reply_text("⚠️ This command must be executed inside a Telegram Group or Supergroup.")
+        return False
+
+    # 3. Bot Administrator status check in chat
     try:
-        settings = await get_current_settings()
+        bot_member = await chat.get_member(context.bot.id)
+        if bot_member.status not in ("administrator", "creator"):
+            if update.effective_message:
+                await update.effective_message.reply_text("❌ Please promote the bot to an Administrator in this group first.")
+            return False
     except Exception as e:
-        logger.error(f"Database setup check failed: {e}")
-        db_ok = False
-        settings = None
+        logger.warning(f"Error checking bot admin permissions: {e}")
+        if update.effective_message:
+            await update.effective_message.reply_text("❌ Failed to verify bot admin permissions in this chat.")
+        return False
 
-    source_configured = bool(settings and settings.source_group_id)
-    delivery_configured = bool(settings and settings.delivery_group_id)
-    railway_detected = is_railway_environment()
-
-    lines = ["🤖 <b>Setup Wizard</b>\n"]
-    lines.append(f"{'✅' if is_bot_admin else '❌'} <b>Bot Administrator</b>")
-    lines.append(f"{'✅' if can_send else '❌'} <b>Can Read & Send Messages</b>")
-    lines.append(f"{'✅' if db_ok else '❌'} <b>Database Connected</b> ({get_db_type_name()})")
-    lines.append(f"{'✅' if railway_detected else 'ℹ️'} <b>Railway Environment</b> ({'Detected' if railway_detected else 'Local/Self-hosted'})")
-    lines.append(f"{'✅' if source_configured else '❌'} <b>Source Group Configured</b>")
-    lines.append(f"{'✅' if delivery_configured else '❌'} <b>Delivery Group Configured</b>")
-
-    if not source_configured or not delivery_configured:
-        lines.append("\n<b>Configuration Required:</b>")
-        if not source_configured:
-            lines.append("Run:\n<code>/source</code>\ninside your Source Group.\n")
-        if not delivery_configured:
-            lines.append("Run:\n<code>/delivery</code>\ninside your Delivery Group.")
-
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+    return True
 
 
 async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles /source command run inside the Source Group.
-    Saves current group ID and title to database.
+    /source command run inside the Source Group.
+    Automatically detects current chat, saves Chat ID and Name to DB.
     """
-    if not await check_admin_permission(update):
+    if not await verify_admin_and_group(update, context):
         return
 
     chat = update.effective_chat
-    if not chat or chat.type not in ("group", "supergroup"):
-        await update.effective_message.reply_text("⚠️ Run <code>/source</code> inside your Source Group.", parse_mode="HTML")
-        return
-
-    # Verify bot admin status
-    try:
-        member = await chat.get_member(context.bot.id)
-        if member.status not in ("administrator", "creator"):
-            await update.effective_message.reply_text("❌ Bot must be an Administrator in this group to set it as Source Group.")
-            return
-    except Exception as e:
-        logger.warning(f"Could not verify bot member status: {e}")
+    group_name = chat.title or "Orders Group"
 
     # Save to database immediately
-    settings = await update_source_group(chat.id, chat.title or "Source Group")
-    group_title = html.escape(settings.source_group_title or chat.title or "Source Group")
+    settings = await update_source_group(chat.id, group_name)
+    title_escaped = html.escape(settings.source_group_title or group_name)
 
     reply_msg = (
-        f"✅ <b>Source Group Configured</b>\n\n"
-        f"<b>Group:</b>\n{group_title}\n\n"
-        f"<b>Chat ID:</b>\n<code>{settings.source_group_id}</code>"
+        f"✅ <b>Source Group Saved</b>\n\n"
+        f"<b>Group:</b>\n{title_escaped}\n\n"
+        f"<b>ID:</b>\n<code>{settings.source_group_id}</code>"
     )
     await update.effective_message.reply_text(reply_msg, parse_mode="HTML")
 
 
 async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles /delivery command run inside the Delivery Group.
-    Saves current group ID and title to database.
+    /delivery command run inside the Delivery Group.
+    Automatically detects current chat, saves Chat ID and Name to DB.
     """
-    if not await check_admin_permission(update):
+    if not await verify_admin_and_group(update, context):
         return
 
     chat = update.effective_chat
-    if not chat or chat.type not in ("group", "supergroup"):
-        await update.effective_message.reply_text("⚠️ Run <code>/delivery</code> inside your Delivery Group.", parse_mode="HTML")
-        return
-
-    # Verify bot admin status
-    try:
-        member = await chat.get_member(context.bot.id)
-        if member.status not in ("administrator", "creator"):
-            await update.effective_message.reply_text("❌ Bot must be an Administrator in this group to set it as Delivery Group.")
-            return
-    except Exception as e:
-        logger.warning(f"Could not verify bot member status: {e}")
+    group_name = chat.title or "Delivery Group"
 
     # Save to database immediately
-    settings = await update_delivery_group(chat.id, chat.title or "Delivery Group")
-    group_title = html.escape(settings.delivery_group_title or chat.title or "Delivery Group")
+    settings = await update_delivery_group(chat.id, group_name)
+    title_escaped = html.escape(settings.delivery_group_title or group_name)
 
     reply_msg = (
-        f"✅ <b>Delivery Group Configured</b>\n\n"
-        f"<b>Group:</b>\n{group_title}\n\n"
-        f"<b>Chat ID:</b>\n<code>{settings.delivery_group_id}</code>"
+        f"✅ <b>Delivery Group Saved</b>\n\n"
+        f"<b>Group:</b>\n{title_escaped}\n\n"
+        f"<b>ID:</b>\n<code>{settings.delivery_group_id}</code>"
     )
     await update.effective_message.reply_text(reply_msg, parse_mode="HTML")
 
@@ -248,24 +218,28 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     settings = await get_current_settings()
 
-    src_name = html.escape(settings.source_group_title or "Unconfigured")
-    src_id = f"<code>{settings.source_group_id}</code>" if settings.source_group_id else "<i>None</i>"
-
-    del_name = html.escape(settings.delivery_group_title or "Unconfigured")
-    del_id = f"<code>{settings.delivery_group_id}</code>" if settings.delivery_group_id else "<i>None</i>"
+    src_title = html.escape(settings.source_group_title or "Unconfigured")
+    del_title = html.escape(settings.delivery_group_title or "Unconfigured")
 
     msg = (
-        "<b>Current Configuration</b>\n\n"
-        f"📥 <b>Source Group</b>\n{src_name}\nChat ID: {src_id}\n\n"
-        f"📤 <b>Delivery Group</b>\n{del_name}\nChat ID: {del_id}\n\n"
-        f"<b>Database:</b> {get_db_type_name()}\n"
-        f"<b>Status:</b> Ready"
+        f"📥 <b>Source Group</b>\n\n{src_title}\n\n"
+        f"📤 <b>Delivery Group</b>\n\n{del_title}\n\n"
+        f"<b>Status</b>\n\nReady"
     )
     await update.effective_message.reply_text(msg, parse_mode="HTML")
 
 
+async def resetgroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /resetgroups command to remove both groups from DB."""
+    if not await check_admin_permission(update):
+        return
+
+    await reset_groups()
+    await update.effective_message.reply_text("✅ All group settings have been reset.", parse_mode="HTML")
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /status command displaying detailed system diagnostic metrics."""
+    """Handles /status command displaying system status."""
     if not await check_admin_permission(update):
         return
 
@@ -274,33 +248,48 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     src_str = html.escape(settings.source_group_title or "Unconfigured")
     if settings.source_group_id:
-        src_str += f" (<code>{settings.source_group_id}</code>)"
+        src_str += f" ({settings.source_group_id})"
 
     del_str = html.escape(settings.delivery_group_title or "Unconfigured")
     if settings.delivery_group_id:
-        del_str += f" (<code>{settings.delivery_group_id}</code>)"
-
-    py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    railway_str = "Active" if is_railway_environment() else "Local / Self-Hosted"
+        del_str += f" ({settings.delivery_group_id})"
 
     msg = (
-        "📊 <b>Bot System Status & Diagnostics</b>\n\n"
-        f"🤖 <b>Bot Version:</b> v1.0.0\n"
-        f"⏱ <b>Bot Uptime:</b> {get_uptime_str()}\n"
-        f"🗄 <b>Database Status:</b> Connected ({get_db_type_name()})\n"
-        f"📥 <b>Source Group:</b> {src_str}\n"
-        f"📤 <b>Delivery Group:</b> {del_str}\n"
-        f"📦 <b>Orders Stored:</b> <code>{stats['total_orders']}</code>\n"
-        f"🖼 <b>Images Stored:</b> <code>{stats['total_images']}</code>\n"
-        f"🐍 <b>Python Version:</b> {py_version}\n"
-        f"🚂 <b>Railway Status:</b> {railway_str}\n"
-        f"💾 <b>Memory Usage:</b> {get_memory_usage_mb()}"
+        "🤖 <b>Bot Status</b>\n\n"
+        f"<b>Status:</b> Online\n"
+        f"<b>Database:</b> Connected ({get_db_type_name()})\n"
+        f"<b>Source Group:</b> {src_str}\n"
+        f"<b>Delivery Group:</b> {del_str}\n"
+        f"<b>Orders Stored:</b> {stats['total_orders']}\n"
+        f"<b>Images Stored:</b> {stats['total_images']}\n"
+        f"<b>Version:</b> v1.0.0\n"
+        f"<b>Uptime:</b> {get_uptime_str()}"
     )
     await update.effective_message.reply_text(msg, parse_mode="HTML")
 
 
+async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /setup command showing step-by-step instructions."""
+    if not await check_admin_permission(update):
+        return
+
+    settings = await get_current_settings()
+    src_ok = bool(settings.source_group_id)
+    del_ok = bool(settings.delivery_group_id)
+
+    lines = [
+        "🤖 <b>Self-Configuring Setup Wizard</b>\n",
+        f"{'✅' if src_ok else '❌'} <b>Source Group:</b> {html.escape(settings.source_group_title or 'Unconfigured')}",
+        f"{'✅' if del_ok else '❌'} <b>Delivery Group:</b> {html.escape(settings.delivery_group_title or 'Unconfigured')}\n",
+        "<b>Setup Instructions:</b>",
+        "1. Add bot to Source Group → Promote to Admin → Send <code>/source</code>",
+        "2. Add bot to Delivery Group → Promote to Admin → Send <code>/delivery</code>"
+    ]
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def removesource_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /removesource command to clear Source Group setting."""
+    """Handles /removesource command."""
     if not await check_admin_permission(update):
         return
 
@@ -309,21 +298,12 @@ async def removesource_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def removedelivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /removedelivery command to clear Delivery Group setting."""
+    """Handles /removedelivery command."""
     if not await check_admin_permission(update):
         return
 
     await remove_delivery_group()
     await update.effective_message.reply_text("✅ Delivery Group Removed Successfully.", parse_mode="HTML")
-
-
-async def resetgroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /resetgroups command to clear both Source and Delivery Group settings."""
-    if not await check_admin_permission(update):
-        return
-
-    await reset_groups()
-    await update.effective_message.reply_text("✅ All group settings have been reset.", parse_mode="HTML")
 
 
 # ==========================================
@@ -344,7 +324,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Welcome {name}! You are authenticated as a bot administrator.\n\n"
         f"📥 <b>Source Group</b>: {html.escape(settings.source_group_title or 'Unconfigured')}\n"
         f"📤 <b>Delivery Group</b>: {html.escape(settings.delivery_group_title or 'Unconfigured')}\n\n"
-        f"Type <code>/help</code> or <code>/setup</code> to manage configuration."
+        f"Type <code>/help</code> or <code>/setup</code> for guidance."
     )
     await update.effective_message.reply_text(welcome_msg, parse_mode="HTML")
 
@@ -357,14 +337,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_msg = (
         "🛠 <b>Admin Commands & Management Suite</b>\n\n"
         "<b>Group Configuration:</b>\n"
-        "• <code>/setup</code> - Interactive setup wizard\n"
-        "• <code>/source</code> - Set current group as Source Group\n"
-        "• <code>/delivery</code> - Set current group as Delivery Group\n"
-        "• <code>/groups</code> - Display current group setup\n"
-        "• <code>/status</code> - Detailed system diagnostics & uptime\n"
+        "• <code>/source</code> - Mark current group as Source Group\n"
+        "• <code>/delivery</code> - Mark current group as Delivery Group\n"
+        "• <code>/groups</code> - Show group status\n"
+        "• <code>/resetgroups</code> - Reset all group settings\n"
+        "• <code>/status</code> - Display bot system status\n"
+        "• <code>/setup</code> - View setup guide\n"
         "• <code>/removesource</code> - Remove Source Group\n"
-        "• <code>/removedelivery</code> - Remove Delivery Group\n"
-        "• <code>/resetgroups</code> - Reset all group configurations\n\n"
+        "• <code>/removedelivery</code> - Remove Delivery Group\n\n"
         "<b>Order & Data Management:</b>\n"
         "• <code>/find &lt;email&gt;</code> - Search order history for email\n"
         "• <code>/resend &lt;email&gt;</code> - Deliver stored images for email\n"
