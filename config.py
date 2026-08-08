@@ -2,6 +2,10 @@
 Configuration management for Telegram Email Image Delivery Bot.
 Only 3 core environment variables are required: BOT_TOKEN, ADMIN_IDS, and DATABASE_URL.
 Group configurations are managed dynamically via Telegram commands (/source and /delivery) and stored in DB.
+
+DATABASE STRATEGY:
+- Production: Uses Railway-injected DATABASE_URL (PostgreSQL via asyncpg)
+- Development: Falls back to SQLite if DATABASE_URL is not set
 """
 
 import os
@@ -45,6 +49,9 @@ class Config:
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
     RAW_ADMIN_IDS: str = os.getenv("ADMIN_IDS", "")
     ADMIN_IDS: Set[int] = set()
+    
+    # DATABASE_URL: Railway injects this for production PostgreSQL.
+    # Falls back to SQLite for local development.
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
 
     # Media Group Debounce Window (seconds)
@@ -92,8 +99,15 @@ class Config:
         elif cls.DATABASE_URL.startswith("sqlite://") and not cls.DATABASE_URL.startswith("sqlite+aiosqlite://"):
             cls.DATABASE_URL = cls.DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
+        # Log database configuration
+        if cls.DATABASE_URL.startswith("postgresql+asyncpg://"):
+            logger.info("[DB] PostgreSQL configured for production use.")
+        elif cls.DATABASE_URL.startswith("sqlite+aiosqlite://"):
+            logger.info("[DB] SQLite configured for local development.")
+        
         if not cls.BOT_TOKEN:
             logger.warning("BOT_TOKEN is not defined in environment variables!")
 
 
 Config.load_and_validate()
+
