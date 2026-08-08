@@ -15,6 +15,7 @@ from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from config import Config
 from database import (
+    BOT_SETTINGS,
     get_order_by_id,
     get_all_orders_by_email,
     get_current_settings,
@@ -94,7 +95,6 @@ async def deliver_order_by_id(
         bool: True if images were delivered successfully, False otherwise.
     """
     order = await get_order_by_id(order_id)
-    settings = await get_current_settings()
 
     if not order or not order.images:
         logger.warning(f"[DELIVERY] Delivery attempted for Order #{order_id} but no stored images were found.")
@@ -136,9 +136,9 @@ async def deliver_order_by_id(
                 pass
         return False
 
-    # Determine Client Group Chat ID
-    client_chat_id = target_delivery_chat_id or order.client_chat_id or settings.source_group_id
-    loader_group_id = loader_chat_id or settings.delivery_group_id
+    # Determine Client Group Chat ID (from order, target parameter, or in-memory cache)
+    client_chat_id = target_delivery_chat_id or order.client_chat_id or BOT_SETTINGS["source_group_id"]
+    loader_group_id = loader_chat_id or BOT_SETTINGS["delivery_group_id"]
 
     if not client_chat_id:
         logger.error(f"[DELIVERY] Delivery failed: Client Group ID not found for Order #{order_id}.")

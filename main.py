@@ -1,7 +1,7 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
 Initializes database, configures handlers, sets Telegram '/' UI command menu,
-starts background tasks, and runs bot polling.
+populates global in-memory BOT_SETTINGS cache on startup, starts background tasks, and runs bot polling.
 """
 
 import sys
@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 from config import Config
-from database import init_db, cleanup_old_records, check_order_timeouts
+from database import init_db, cleanup_old_records, check_order_timeouts, reload_bot_settings_cache
 from utils import setup_logging
 from handlers import (
     source_group_handler,
@@ -73,6 +73,9 @@ async def post_init(application: Application) -> None:
     """Post-initialization callback run inside the active application event loop."""
     logger.info("Initializing database schema...")
     await init_db()
+
+    # Load Settings from DB once on startup and populate in-memory BOT_SETTINGS cache
+    await reload_bot_settings_cache()
 
     # Register Bot Commands list so Telegram displays them in the interactive '/' popup menu
     commands = [

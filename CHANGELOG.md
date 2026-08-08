@@ -5,12 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-08
+
+### Refactored & Changed
+- **Global In-Memory `BOT_SETTINGS` Cache**: Refactored the group configuration system to eliminate per-message database queries. Incoming updates in `source_group_handler` and `delivery_group_handler` validate group IDs strictly in RAM using `BOT_SETTINGS["source_group_id"]` and `BOT_SETTINGS["delivery_group_id"]`.
+- **Startup Settings Pre-loading**: Added `reload_bot_settings_cache()` in `post_init()`, loading settings from database once during bot startup. Added `[CACHE]` startup logs (`Source Group Loaded: ...`, `Delivery Group Loaded: ...`, or `No groups configured.`).
+- **Dynamic Command Cache Updates**: `/source` and `/delivery` commands save changes to PostgreSQL/SQLite and immediately update `BOT_SETTINGS` in-memory so no restart is required.
+- **Restart Resilience**: Configuration is automatically loaded from the database across Railway restarts.
+
 ## [1.6.0] - 2026-08-08
 
 ### Added & Changed
 - **Keyword-Based Order Detection**: Messages in Client Group are checked against a dedicated keyword list in `keywords.py`. Only messages containing at least one order keyword (`.com`, `.co`, `.net`, `.org`, `.pk`, `.io`, `.gg`, `gmail`, `gma`, `hotmail`, `hotmail.com`, `outlook`, `outlook.com`, `yahoo`, `icloud`, `proton`, `+`, `email`) are forwarded. All non-matching messages are ignored completely.
-- **Dedicated `keywords.py`**: Configurable, dedicated keyword file supporting case-insensitive keyword detection across text, photo captions, and document captions.
-- **Detector Logging**: Added `[DETECTOR] Keyword matched: <kw>`, `[DETECTOR] Order forwarded.`, and `[DETECTOR] No keyword found. Message ignored.`
 
 ## [1.5.0] - 2026-08-08
 

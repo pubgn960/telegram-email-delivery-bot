@@ -2,6 +2,7 @@
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Keyword-Based Order Detection (keywords.py), Telegram Reactions, and Admin Commands.
+Utilizes global BOT_SETTINGS cache for zero-database-query message filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
 """
 
@@ -22,6 +23,7 @@ from email_parser import extract_email, extract_order_id, extract_package
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
+    BOT_SETTINGS,
     get_current_settings,
     update_source_group,
     update_delivery_group,
@@ -63,6 +65,7 @@ logger = logging.getLogger(__name__)
 async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in Group 1 (Client Group).
+    Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
     When a customer sends an order message containing at least one order detection keyword:
     1. Registers new Order in DB with status 'Pending'.
     2. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
@@ -74,10 +77,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not message or not chat:
         return
 
-    settings = await get_current_settings()
-    configured_client_id = settings.source_group_id
-
-    logger.info(f"[SOURCE] Loaded Source Group: {configured_client_id}")
+    # Check against in-memory BOT_SETTINGS cache (Zero DB SELECT query)
+    configured_client_id = BOT_SETTINGS["source_group_id"]
 
     if not configured_client_id:
         logger.warning(f"[CLIENT] Client Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
@@ -113,7 +114,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     # 2. Copy Original Customer Message to Loader Group EXACTLY as received (Zero added metadata or headers)
-    loader_group_id = settings.delivery_group_id
+    loader_group_id = BOT_SETTINGS["delivery_group_id"]
     if loader_group_id:
         try:
             try:
@@ -155,6 +156,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in Group 2 (Loader Group).
+    Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
     Validates that incoming images/documents are sent strictly as a reply to a valid bot Order Message.
     Identifies order by DB lookup and triggers album debouncing and automatic delivery.
     """
@@ -164,10 +166,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not message or not chat:
         return
 
-    settings = await get_current_settings()
-    configured_loader_id = settings.delivery_group_id
-
-    logger.info(f"[DELIVERY_GROUP] Loaded Delivery Group: {configured_loader_id}")
+    # Check against in-memory BOT_SETTINGS cache (Zero DB SELECT query)
+    configured_loader_id = BOT_SETTINGS["delivery_group_id"]
 
     if not configured_loader_id:
         logger.warning(f"[LOADER] Loader Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
@@ -299,7 +299,7 @@ async def verify_admin_and_group(update: Update, context: ContextTypes.DEFAULT_T
 async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /source command run inside Group 1 (Client Group).
-    Saves Chat ID and Name to DB as Client Group.
+    Saves Chat ID and Name to DB as Client Group and immediately updates BOT_SETTINGS cache.
     """
     if not await verify_admin_and_group(update, context):
         return
@@ -308,6 +308,7 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     group_name = chat.title or "Client Group"
 
     logger.info(f"[SOURCE] Command received in chat: {chat.id}")
+    logger.info("[SOURCE] Saving Source Group...")
     settings = await update_source_group(chat.id, group_name)
 
     title_escaped = html.escape(settings.source_group_title or group_name)
@@ -323,7 +324,7 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /delivery command run inside Group 2 (Loader Group).
-    Saves Chat ID and Name to DB as Loader Group.
+    Saves Chat ID and Name to DB as Loader Group and immediately updates BOT_SETTINGS cache.
     """
     if not await verify_admin_and_group(update, context):
         return
@@ -332,6 +333,7 @@ async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     group_name = chat.title or "Loader Group"
 
     logger.info(f"[DELIVERY_GROUP] Command received in chat: {chat.id}")
+    logger.info("[DELIVERY_GROUP] Saving Delivery Group...")
     settings = await update_delivery_group(chat.id, group_name)
 
     title_escaped = html.escape(settings.delivery_group_title or group_name)
@@ -345,7 +347,7 @@ async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /groups command displaying active group settings."""
+    """Handles /groups command displaying active group settings from database."""
     if not await check_admin_permission(update):
         return
 

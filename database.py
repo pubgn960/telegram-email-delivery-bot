@@ -2,6 +2,7 @@
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
 backup/restore, and detailed statistics dashboard.
+Includes global in-memory BOT_SETTINGS cache for high-performance zero-query message filtering.
 """
 
 import os
@@ -36,6 +37,14 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False
 )
 
+# Global in-memory settings cache to avoid querying database on every message update
+BOT_SETTINGS: Dict[str, Any] = {
+    "source_group_id": None,
+    "delivery_group_id": None,
+    "source_group_title": None,
+    "delivery_group_title": None
+}
+
 
 async def dispose_engine() -> None:
     """Disposes active database engine connection pool."""
@@ -66,7 +75,7 @@ async def init_db() -> None:
 
 
 # ==========================================
-# Dynamic Settings Operations
+# Dynamic Settings Operations & Cache
 # ==========================================
 
 async def get_or_create_settings() -> Settings:
@@ -98,12 +107,38 @@ async def get_current_settings() -> Settings:
     return await get_or_create_settings()
 
 
+async def reload_bot_settings_cache() -> Dict[str, Any]:
+    """
+    Loads Settings record from database once and populates the global BOT_SETTINGS in-memory cache.
+    Outputs structured [CACHE] logs on startup.
+    """
+    settings = await get_or_create_settings()
+    BOT_SETTINGS["source_group_id"] = settings.source_group_id
+    BOT_SETTINGS["delivery_group_id"] = settings.delivery_group_id
+    BOT_SETTINGS["source_group_title"] = settings.source_group_title
+    BOT_SETTINGS["delivery_group_title"] = settings.delivery_group_title
+
+    src_id = BOT_SETTINGS["source_group_id"]
+    del_id = BOT_SETTINGS["delivery_group_id"]
+
+    logger.info("[CACHE]")
+    if src_id:
+        logger.info(f"[CACHE] Source Group Loaded: {src_id}")
+    if del_id:
+        logger.info(f"[CACHE] Delivery Group Loaded: {del_id}")
+
+    if not src_id and not del_id:
+        logger.info("[CACHE] No groups configured.")
+
+    return BOT_SETTINGS
+
+
 async def update_source_group(chat_id: int, title: str) -> Settings:
     """
     Updates the Source Group (Client Group) configuration in database,
-    ensuring exactly one Settings record exists, committing to DB, and reloading.
+    commits transaction, and immediately updates the global BOT_SETTINGS cache.
     """
-    logger.info(f"[SOURCE] Saving Source Group...")
+    logger.info(f"[SOURCE] Saving Source Group: {chat_id}")
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -127,19 +162,18 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
         await session.commit()
         logger.info("[SOURCE] Database commit successful.")
 
-    # Reload directly from database to verify persistence
-    reloaded_settings = await get_current_settings()
-    logger.info(f"[SOURCE] Source Group saved: {reloaded_settings.source_group_id}")
-    logger.info(f"[SOURCE] Reload successful.")
-    return reloaded_settings
+    # Immediately refresh in-memory cache
+    await reload_bot_settings_cache()
+    logger.info(f"[SOURCE] Source Group saved: {chat_id}")
+    return settings
 
 
 async def update_delivery_group(chat_id: int, title: str) -> Settings:
     """
     Updates the Delivery Group (Loader Group) configuration in database,
-    ensuring exactly one Settings record exists, committing to DB, and reloading.
+    commits transaction, and immediately updates the global BOT_SETTINGS cache.
     """
-    logger.info(f"[DELIVERY_GROUP] Saving Delivery Group...")
+    logger.info(f"[DELIVERY_GROUP] Saving Delivery Group: {chat_id}")
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -163,15 +197,14 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
         await session.commit()
         logger.info("[DELIVERY_GROUP] Database commit successful.")
 
-    # Reload directly from database to verify persistence
-    reloaded_settings = await get_current_settings()
-    logger.info(f"[DELIVERY_GROUP] Delivery Group saved: {reloaded_settings.delivery_group_id}")
-    logger.info(f"[DELIVERY_GROUP] Reload successful.")
-    return reloaded_settings
+    # Immediately refresh in-memory cache
+    await reload_bot_settings_cache()
+    logger.info(f"[DELIVERY_GROUP] Delivery Group saved: {chat_id}")
+    return settings
 
 
 async def remove_source_group() -> Settings:
-    """Removes Client Group configuration from database."""
+    """Removes Client Group configuration from database and refreshes in-memory cache."""
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -183,11 +216,12 @@ async def remove_source_group() -> Settings:
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
+    await reload_bot_settings_cache()
     return await get_current_settings()
 
 
 async def remove_delivery_group() -> Settings:
-    """Removes Loader Group configuration from database."""
+    """Removes Loader Group configuration from database and refreshes in-memory cache."""
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -199,11 +233,12 @@ async def remove_delivery_group() -> Settings:
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
+    await reload_bot_settings_cache()
     return await get_current_settings()
 
 
 async def reset_groups() -> Settings:
-    """Resets both Client and Loader Group configurations in database."""
+    """Resets both Client and Loader Group configurations in database and refreshes in-memory cache."""
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -217,6 +252,7 @@ async def reset_groups() -> Settings:
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
+    await reload_bot_settings_cache()
     return await get_current_settings()
 
 

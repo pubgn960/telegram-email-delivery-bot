@@ -1,7 +1,7 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
 Tests email, Order ID, package extraction, keyword detection, album splitting,
-SHA256 fingerprinting, user sessions, and two-group reply-based DB operations.
+SHA256 fingerprinting, user sessions, BOT_SETTINGS cache, and two-group reply-based DB operations.
 """
 
 import unittest
@@ -11,7 +11,9 @@ from keywords import contains_order_keyword
 from delivery import chunk_list
 from media_collector import user_session_manager
 from database import (
+    BOT_SETTINGS,
     init_db,
+    reload_bot_settings_cache,
     create_order,
     set_order_loader_message_id,
     get_order_by_id,
@@ -30,6 +32,33 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestBotSettingsCache(unittest.IsolatedAsyncioTestCase):
+    """Tests in-memory BOT_SETTINGS cache initialization and updates."""
+
+    async def test_cache_update_and_reload(self):
+        await init_db()
+
+        # Update source group and verify cache instantly reflects changes
+        await update_source_group(-1001234567890, "Test Client Group")
+        self.assertEqual(BOT_SETTINGS["source_group_id"], -1001234567890)
+        self.assertEqual(BOT_SETTINGS["source_group_title"], "Test Client Group")
+
+        # Update delivery group and verify cache instantly reflects changes
+        await update_delivery_group(-1009876543210, "Test Loader Group")
+        self.assertEqual(BOT_SETTINGS["delivery_group_id"], -1009876543210)
+        self.assertEqual(BOT_SETTINGS["delivery_group_title"], "Test Loader Group")
+
+        # Simulate bot restart by calling reload_bot_settings_cache()
+        cached = await reload_bot_settings_cache()
+        self.assertEqual(cached["source_group_id"], -1001234567890)
+        self.assertEqual(cached["delivery_group_id"], -1009876543210)
+
+        # Reset groups and verify cache cleared
+        await reset_groups()
+        self.assertIsNone(BOT_SETTINGS["source_group_id"])
+        self.assertIsNone(BOT_SETTINGS["delivery_group_id"])
 
 
 class TestKeywordDetector(unittest.TestCase):
