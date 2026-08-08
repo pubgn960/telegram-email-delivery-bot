@@ -1,17 +1,41 @@
 """
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
-Defines schemas and indexes for Orders and Images tables.
+Defines schemas and indexes for Orders, Images, and Settings tables.
 """
 
 from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Index
+from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     """Base model class."""
     pass
+
+
+class Settings(Base):
+    """
+    Stores dynamic application settings and group configurations.
+    Maintains a single record (id=1).
+    """
+
+    __tablename__ = "settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    source_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    source_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    delivery_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    delivery_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<Settings(id={self.id}, source={self.source_group_id}, delivery={self.delivery_group_id})>"
 
 
 class Order(Base):

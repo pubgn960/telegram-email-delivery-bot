@@ -1,6 +1,6 @@
 """
 Database manager providing asynchronous SQLAlchemy session management, CRUD operations,
-SHA256 fingerprint deduplication, CSV export, backup, and restore helpers.
+SHA256 fingerprint deduplication, CSV export, backup/restore, and dynamic Settings management.
 """
 
 import os
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import joinedload
 
 from config import Config
-from models import Base, Order, Image
+from models import Base, Order, Image, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +46,6 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
     """
     Computes a unique SHA256 fingerprint for an upload.
     Formula: SHA256(email + image_count + sorted_file_ids)
-
-    Args:
-        email (str): Target normalized email address.
-        file_ids (List[str]): List of Telegram file_id strings.
-
-    Returns:
-        str: 64-character SHA256 hex string.
     """
     email_clean = email.lower().strip()
     count_str = str(len(file_ids))
@@ -62,29 +55,164 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
 
 
 async def init_db() -> None:
-    """Initializes the database schema."""
+    """Initializes the database schema and ensures single Settings record exists."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database initialized successfully.")
 
+    # Initialize single Settings record if missing
+    await get_or_create_settings()
+
+
+# ==========================================
+# Dynamic Settings Operations
+# ==========================================
+
+async def get_or_create_settings() -> Settings:
+    """
+    Retrieves or initializes the single Settings record (id=1).
+    Initializes from Config / .env if created for the first time.
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
+
+        if not settings:
+            async with session.begin():
+                init_source = Config.SOURCE_GROUP_ID if Config.SOURCE_GROUP_ID != 0 else None
+                init_delivery = Config.DELIVERY_GROUP_ID if Config.DELIVERY_GROUP_ID != 0 else None
+                settings = Settings(
+                    id=1,
+                    source_group_id=init_source,
+                    source_group_title="Default Source Group" if init_source else None,
+                    delivery_group_id=init_delivery,
+                    delivery_group_title="Default Delivery Group" if init_delivery else None,
+                    updated_at=datetime.now(timezone.utc)
+                )
+                session.add(settings)
+            
+            # Reload initialized settings
+            res = await session.execute(stmt)
+            settings = res.scalar_one()
+            logger.info("Initialized default Settings record in database.")
+
+        return settings
+
+
+async def get_current_settings() -> Settings:
+    """Retrieves current Settings record from database."""
+    return await get_or_create_settings()
+
+
+async def update_source_group(chat_id: int, title: str) -> Settings:
+    """Updates the Source Group configuration in database."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Settings)
+                .where(Settings.id == 1)
+                .values(
+                    source_group_id=chat_id,
+                    source_group_title=title,
+                    updated_at=datetime.now(timezone.utc)
+                )
+            )
+            await session.execute(stmt)
+        logger.info(f"Source Group updated in DB: ID={chat_id}, Title='{title}'")
+
+    return await get_or_create_settings()
+
+
+async def update_delivery_group(chat_id: int, title: str) -> Settings:
+    """Updates the Delivery Group configuration in database."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Settings)
+                .where(Settings.id == 1)
+                .values(
+                    delivery_group_id=chat_id,
+                    delivery_group_title=title,
+                    updated_at=datetime.now(timezone.utc)
+                )
+            )
+            await session.execute(stmt)
+        logger.info(f"Delivery Group updated in DB: ID={chat_id}, Title='{title}'")
+
+    return await get_or_create_settings()
+
+
+async def remove_source_group() -> Settings:
+    """Removes Source Group configuration from database."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Settings)
+                .where(Settings.id == 1)
+                .values(
+                    source_group_id=None,
+                    source_group_title=None,
+                    updated_at=datetime.now(timezone.utc)
+                )
+            )
+            await session.execute(stmt)
+        logger.info("Source Group configuration removed from DB.")
+
+    return await get_or_create_settings()
+
+
+async def remove_delivery_group() -> Settings:
+    """Removes Delivery Group configuration from database."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Settings)
+                .where(Settings.id == 1)
+                .values(
+                    delivery_group_id=None,
+                    delivery_group_title=None,
+                    updated_at=datetime.now(timezone.utc)
+                )
+            )
+            await session.execute(stmt)
+        logger.info("Delivery Group configuration removed from DB.")
+
+    return await get_or_create_settings()
+
+
+async def reset_groups() -> Settings:
+    """Resets both Source and Delivery Group configurations in database."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Settings)
+                .where(Settings.id == 1)
+                .values(
+                    source_group_id=None,
+                    source_group_title=None,
+                    delivery_group_id=None,
+                    delivery_group_title=None,
+                    updated_at=datetime.now(timezone.utc)
+                )
+            )
+            await session.execute(stmt)
+        logger.info("All Group settings reset in DB.")
+
+    return await get_or_create_settings()
+
+
+# ==========================================
+# Order & Image Operations
+# ==========================================
 
 async def save_order(
     email: str,
     file_items: List[Tuple[str, str]],
     media_group_id: Optional[str] = None
 ) -> Tuple[Optional[Order], bool]:
-    """
-    Saves a new Order and images using SHA256 fingerprint duplicate suppression.
-
-    Args:
-        email (str): Recipient email.
-        file_items (List[Tuple[str, str]]): List of (file_id, file_type) tuples.
-        media_group_id (str, optional): Media group identifier.
-
-    Returns:
-        Tuple[Optional[Order], bool]: (Saved Order, is_duplicate)
-    """
+    """Saves a new Order and images using SHA256 fingerprint duplicate suppression."""
     if not file_items:
         return None, False
 
@@ -117,7 +245,7 @@ async def save_order(
                 created_at=datetime.now(timezone.utc)
             )
             session.add(new_order)
-            await session.flush()  # Populate order.id
+            await session.flush()
 
             # Add Image records
             for idx, (file_id, file_type) in enumerate(file_items):
@@ -247,10 +375,7 @@ async def cleanup_old_records(days: int) -> int:
 
 
 async def export_orders_to_csv() -> str:
-    """
-    Generates CSV formatted string containing all orders export data using standard csv module.
-    Columns: Email, Images, Created, Delivered
-    """
+    """Generates CSV formatted string containing all orders export data using standard csv module."""
     async with AsyncSessionLocal() as session:
         stmt = select(Order).options(joinedload(Order.images)).order_by(Order.created_at.desc())
         res = await session.execute(stmt)

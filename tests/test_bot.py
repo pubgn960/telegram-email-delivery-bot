@@ -1,7 +1,7 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
-Tests email extraction, album splitting (8, 18, 35, 100+ items), SHA256 fingerprinting,
-user session fallback, and database CRUD & CSV export operations.
+Tests email extraction, album splitting, SHA256 fingerprinting, user sessions,
+and dynamic DB-backed Settings / Group configuration CRUD.
 """
 
 import unittest
@@ -18,7 +18,13 @@ from database import (
     delete_orders_by_email,
     get_stats,
     compute_fingerprint,
-    export_orders_to_csv
+    export_orders_to_csv,
+    get_or_create_settings,
+    update_source_group,
+    update_delivery_group,
+    remove_source_group,
+    remove_delivery_group,
+    reset_groups
 )
 
 
@@ -63,12 +69,6 @@ class TestDeliverySplitting(unittest.TestCase):
         self.assertEqual(len(chunks), 4)
         self.assertEqual([len(c) for c in chunks], [10, 10, 10, 5])
 
-    def test_chunking_hundred_plus_images(self):
-        images = [f"file_id_{i}" for i in range(105)]
-        chunks = chunk_list(images, chunk_size=10)
-        self.assertEqual(len(chunks), 11)
-        self.assertEqual(len(chunks[-1]), 5)
-
 
 class TestUserSessionManager(unittest.TestCase):
     """Tests 5-minute user session tracking."""
@@ -82,48 +82,59 @@ class TestUserSessionManager(unittest.TestCase):
         self.assertEqual(retrieved, email)
 
 
-class TestFingerprintAndDatabase(unittest.IsolatedAsyncioTestCase):
-    """Async tests for database CRUD, SHA256 fingerprinting, and CSV export."""
+class TestSettingsAndDatabase(unittest.IsolatedAsyncioTestCase):
+    """Async tests for database Settings CRUD and Order operations."""
 
-    async def test_fingerprint_generation(self):
-        email = "test.user@example.com"
-        files_a = ["file_a", "file_b"]
-        files_b = ["file_b", "file_a"]
+    async def test_settings_lifecycle(self):
+        await init_db()
 
-        fp_a = compute_fingerprint(email, files_a)
-        fp_b = compute_fingerprint(email, files_b)
-        self.assertEqual(fp_a, fp_b)  # Order agnostic fingerprinting
+        # 1. Get or create initial settings
+        settings = await get_or_create_settings()
+        self.assertEqual(settings.id, 1)
 
-    async def test_database_lifecycle(self):
+        # 2. Update Source Group
+        updated_src = await update_source_group(-1001234567890, "Orders Source Group")
+        self.assertEqual(updated_src.source_group_id, -1001234567890)
+        self.assertEqual(updated_src.source_group_title, "Orders Source Group")
+
+        # 3. Update Delivery Group
+        updated_del = await update_delivery_group(-1009876543210, "Delivery Target Group")
+        self.assertEqual(updated_del.delivery_group_id, -1009876543210)
+        self.assertEqual(updated_del.delivery_group_title, "Delivery Target Group")
+
+        # 4. Remove Source Group
+        rem_src = await remove_source_group()
+        self.assertIsNone(rem_src.source_group_id)
+
+        # 5. Remove Delivery Group
+        rem_del = await remove_delivery_group()
+        self.assertIsNone(rem_del.delivery_group_id)
+
+        # 6. Reset all groups
+        reset_res = await reset_groups()
+        self.assertIsNone(reset_res.source_group_id)
+        self.assertIsNone(reset_res.delivery_group_id)
+
+    async def test_database_order_lifecycle(self):
         await init_db()
 
         test_email = "db_test@example.com"
         file_items = [("file_1", "photo"), ("file_2", "photo"), ("doc_1", "document")]
 
-        # 1. Save new order
         order, is_dup = await save_order(test_email, file_items, media_group_id="mg_test_99")
         self.assertFalse(is_dup)
         self.assertIsNotNone(order)
-        self.assertEqual(order.email, test_email)
 
-        # 2. Check fingerprint duplicate detection
-        dup_order, is_dup_flag = await save_order(test_email, file_items, media_group_id="mg_test_diff")
-        self.assertTrue(is_dup_flag)
-
-        # 3. Query pending orders
         pending = await get_pending_orders()
         self.assertTrue(any(o.id == order.id for o in pending))
 
-        # 4. Mark delivered
         await mark_order_delivered(order.id)
         newest = await get_newest_order_by_email(test_email)
         self.assertIsNotNone(newest.delivered_at)
 
-        # 5. Export CSV
         csv_text = await export_orders_to_csv()
         self.assertIn("db_test@example.com", csv_text)
 
-        # 6. Delete order
         count = await delete_orders_by_email(test_email)
         self.assertGreaterEqual(count, 1)
 

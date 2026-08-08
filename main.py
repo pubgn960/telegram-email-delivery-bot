@@ -29,7 +29,15 @@ from handlers import (
     pending_command,
     export_command,
     backup_command,
-    restore_command
+    restore_command,
+    setup_command,
+    source_command,
+    delivery_command,
+    groups_command,
+    status_command,
+    removesource_command,
+    removedelivery_command,
+    resetgroups_command
 )
 
 # Initialize application logging
@@ -83,7 +91,17 @@ def main() -> None:
         .build()
     )
 
-    # Register Admin Commands
+    # Register Setup & Group Configuration Commands
+    application.add_handler(CommandHandler("setup", setup_command))
+    application.add_handler(CommandHandler("source", source_command))
+    application.add_handler(CommandHandler("delivery", delivery_command))
+    application.add_handler(CommandHandler("groups", groups_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("removesource", removesource_command))
+    application.add_handler(CommandHandler("removedelivery", removedelivery_command))
+    application.add_handler(CommandHandler("resetgroups", resetgroups_command))
+
+    # Register Core Admin Commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("find", find_command))
