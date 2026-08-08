@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-08
+
+### Added & Changed
+- **Reply-Based Delivery Workflow**: Switched from searching email text in loader messages to explicit Reply-Based Order Mapping.
+- **Order Registration**: Automatically registers customer orders and posts Order Headers (`📦 New Order \n Email: ... \n Order ID: ...`) into the Source/Loader Group.
+- **Strict Loader Reply Validation**: Enforces that loaders MUST reply to the original Order Header message when sending images. Rejects non-reply media uploads with: `❌ Please reply to the original order message before sending images.`
+- **Order ID Matching**: Extracts Order ID and customer email directly from replied-to messages.
+- **Loader Success Reply**: Sends automatic confirmation to the loader in Source Group upon successful delivery: `✅ Delivery Successful \n Email: ... \n Images: ... \n Order ID: ...`.
+- **Delivery Header**: Sends order summary in Delivery Group: `📧 Email: ... \n 📦 Order ID: ... \n ✅ Delivery Completed`.
+- **Zero Group ID Environment Variables**: Complete self-configuration via `/source` and `/delivery` Telegram commands without Railway `.env` edits.
+
 ## [1.0.0] - 2026-08-08
 
 ### Added

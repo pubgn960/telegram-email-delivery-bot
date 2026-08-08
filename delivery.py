@@ -1,8 +1,10 @@
 """
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
-photo/document dispatching, API retries, and delivery status tracking.
+photo/document dispatching to Delivery Group, API retries, delivery status updates,
+and Loader Success Replies.
 """
 
+import html
 import asyncio
 import logging
 from typing import List, Union, Optional, Any
@@ -11,8 +13,10 @@ from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from config import Config
 from database import (
+    get_order_by_id,
     get_newest_order_by_email,
     get_all_orders_by_email,
+    get_current_settings,
     mark_order_delivered,
     delete_orders_by_email
 )
@@ -39,17 +43,6 @@ async def send_media_group_with_retry(
 ) -> bool:
     """
     Sends a media group to a Telegram chat with retry handling for rate limits and errors.
-
-    Args:
-        bot (Bot): Telegram Bot instance.
-        chat_id (int): Destination chat/group ID.
-        media (List[MediaUnion]): Array of InputMediaPhoto or InputMediaDocument objects (max 10).
-        reply_to_message_id (int, optional): Message ID to reply to.
-        max_retries (int): Maximum retry attempts.
-        delay (float): Delay between retries in seconds.
-
-    Returns:
-        bool: True if delivered successfully, False otherwise.
     """
     if not media:
         return True
@@ -79,72 +72,67 @@ async def send_media_group_with_retry(
     return False
 
 
-async def deliver_images_for_email(
+async def deliver_order_by_id(
     bot: Bot,
-    chat_id: int,
-    email: str,
-    reply_to_message_id: Optional[int] = None,
-    send_all_history: bool = False
+    order_id: int,
+    loader_chat_id: Optional[int] = None,
+    loader_reply_msg_id: Optional[int] = None,
+    target_delivery_chat_id: Optional[int] = None
 ) -> bool:
     """
-    Retrieves stored image records for an email address and delivers them as Telegram albums.
-    Ensures photos and documents are dispatched in uniform media type groups to satisfy Telegram API.
+    Delivers stored images for an Order ID to the configured Delivery Group.
+    Sends completion header to Delivery Group and Success Reply back to the Loader in Source Group.
 
     Args:
         bot (Bot): Telegram Bot instance.
-        chat_id (int): Destination chat ID.
-        email (str): Normalized target email address.
-        reply_to_message_id (int, optional): Message ID to reply to in Telegram.
-        send_all_history (bool): If True, sends all orders for email; if False, sends newest order.
+        order_id (int): Target Order ID.
+        loader_chat_id (Optional[int]): Source Group chat ID where loader replied.
+        loader_reply_msg_id (Optional[int]): Loader's upload message ID to reply to.
+        target_delivery_chat_id (Optional[int]): Override destination chat ID (used by /resend).
 
     Returns:
-        bool: True if images were found and delivered, False otherwise.
+        bool: True if images were delivered successfully, False otherwise.
     """
-    email_clean = email.lower().strip()
-
-    if send_all_history:
-        orders: List[Order] = await get_all_orders_by_email(email_clean)
-    else:
-        newest = await get_newest_order_by_email(email_clean)
-        orders = [newest] if newest else []
-
-    if not orders:
-        logger.info(f"Delivery requested for '{email_clean}' but no records were found.")
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="❌ No images found for this email.",
-                reply_to_message_id=reply_to_message_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to send 'no images' reply message: {e}")
+    order = await get_order_by_id(order_id)
+    if not order or not order.images:
+        logger.warning(f"Delivery attempted for Order ID {order_id} but no stored images were found.")
+        if loader_chat_id and loader_reply_msg_id:
+            try:
+                await bot.send_message(
+                    chat_id=loader_chat_id,
+                    text="❌ Unable to deliver order: No stored images found for this Order ID.",
+                    reply_to_message_id=loader_reply_msg_id
+                )
+            except Exception:
+                pass
         return False
 
-    # Eagerly collect image objects preserving position order
-    all_images: List[Image] = []
-    for order in orders:
-        all_images.extend(order.images)
+    # Determine target Delivery Group ID
+    if not target_delivery_chat_id:
+        settings = await get_current_settings()
+        target_delivery_chat_id = settings.delivery_group_id
 
+    if not target_delivery_chat_id:
+        logger.error("Delivery failed: Delivery Group is not configured in database settings.")
+        if loader_chat_id and loader_reply_msg_id:
+            try:
+                await bot.send_message(
+                    chat_id=loader_chat_id,
+                    text="❌ Delivery Group is not configured yet. Run <code>/delivery</code> in your Delivery Group.",
+                    reply_to_message_id=loader_reply_msg_id,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return False
+
+    all_images: List[Image] = list(order.images)
     total_images = len(all_images)
-    logger.info(f"Delivering {total_images} images for email: '{email_clean}' to chat: {chat_id}")
+    email_escaped = html.escape(order.email)
 
-    # Send status header reply message
-    header_text = (
-        f"✅ Images found\n"
-        f"Email: {email_clean}\n"
-        f"Total Images: {total_images}"
-    )
+    logger.info(f"Delivering Order ID: {order_id} ({total_images} images) to Delivery Group: {target_delivery_chat_id}")
 
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=header_text,
-            reply_to_message_id=reply_to_message_id
-        )
-    except Exception as e:
-        logger.error(f"Failed to send delivery header message: {e}")
-
-    # Group contiguous images of the same file_type to prevent mixing photos & documents in a single sendMediaGroup
+    # 1. Dispatch images to Delivery Group in batches of max 10 items (grouped by file_type)
     grouped_batches: List[List[Image]] = []
     current_batch: List[Image] = []
 
@@ -174,20 +162,95 @@ async def deliver_images_for_email(
 
         sent = await send_media_group_with_retry(
             bot=bot,
-            chat_id=chat_id,
+            chat_id=target_delivery_chat_id,
             media=media_group
         )
         if sent:
             delivered_count += len(batch)
 
-    # Mark orders as delivered in DB
-    for order in orders:
-        await mark_order_delivered(order.id)
+    # 2. Send Delivery Completion Header in Delivery Group
+    completion_text = (
+        f"📧 <b>Email:</b>\n{email_escaped}\n\n"
+        f"📦 <b>Order ID:</b>\n{order.id}\n\n"
+        f"✅ <b>Delivery Completed</b>"
+    )
 
-    # Optional post-delivery cleanup
+    try:
+        await bot.send_message(
+            chat_id=target_delivery_chat_id,
+            text=completion_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send delivery completion header to Delivery Group: {e}")
+
+    # 3. Mark order as delivered in database
+    await mark_order_delivered(order.id)
+    logger.info(f"Delivery Completed | Order ID: {order.id} | Email: {order.email} | Sent: {delivered_count}/{total_images}")
+
+    # 4. Send Success Reply back to Loader in Source Group
+    if loader_chat_id and loader_reply_msg_id:
+        loader_success_text = (
+            f"✅ <b>Delivery Successful</b>\n\n"
+            f"<b>Email:</b>\n{email_escaped}\n\n"
+            f"<b>Images:</b>\n{total_images}\n\n"
+            f"<b>Order ID:</b>\n{order.id}"
+        )
+        try:
+            await bot.send_message(
+                chat_id=loader_chat_id,
+                text=loader_success_text,
+                reply_to_message_id=loader_reply_msg_id,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send loader success reply in Source Group: {e}")
+
+    # 5. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:
-        logger.info(f"DELETE_AFTER_DELIVERY enabled. Purging orders for email: '{email_clean}'")
-        await delete_orders_by_email(email_clean)
+        logger.info(f"DELETE_AFTER_DELIVERY enabled. Purging order {order.id} for email: '{order.email}'")
+        await delete_orders_by_email(order.email)
 
-    logger.info(f"Delivery completed for email '{email_clean}'. Sent {delivered_count}/{total_images} items.")
     return True
+
+
+async def deliver_images_for_email(
+    bot: Bot,
+    chat_id: int,
+    email: str,
+    reply_to_message_id: Optional[int] = None,
+    send_all_history: bool = False
+) -> bool:
+    """
+    Finds orders for email and delivers them to target chat (used by /resend command).
+    """
+    email_clean = email.lower().strip()
+
+    if send_all_history:
+        orders: List[Order] = await get_all_orders_by_email(email_clean)
+    else:
+        newest = await get_newest_order_by_email(email_clean)
+        orders = [newest] if newest else []
+
+    if not orders:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="❌ No images found for this email.",
+                reply_to_message_id=reply_to_message_id
+            )
+        except Exception:
+            pass
+        return False
+
+    success = False
+    for order in orders:
+        res = await deliver_order_by_id(
+            bot=bot,
+            order_id=order.id,
+            target_delivery_chat_id=chat_id
+        )
+        if res:
+            success = True
+
+    return success

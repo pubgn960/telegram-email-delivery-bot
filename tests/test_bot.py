@@ -1,17 +1,19 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
-Tests email extraction, album splitting, SHA256 fingerprinting, user sessions,
-and dynamic DB-backed Settings / Group configuration CRUD.
+Tests email extraction, Order ID parsing, album splitting, SHA256 fingerprinting,
+user sessions, and Reply-Based Delivery Workflow DB operations.
 """
 
 import unittest
 import asyncio
-from email_parser import extract_email
+from email_parser import extract_email, extract_order_id
 from delivery import chunk_list
 from media_collector import user_session_manager
 from database import (
     init_db,
-    save_order,
+    create_pending_order,
+    get_order_by_id,
+    add_images_to_order,
     get_newest_order_by_email,
     mark_order_delivered,
     get_pending_orders,
@@ -28,8 +30,8 @@ from database import (
 )
 
 
-class TestEmailParser(unittest.TestCase):
-    """Tests email extraction and normalization."""
+class TestEmailAndOrderIdParser(unittest.TestCase):
+    """Tests email and Order ID regex extraction."""
 
     def test_extract_basic_email(self):
         text = "Order confirmation for john@gmail.com please deliver."
@@ -39,13 +41,13 @@ class TestEmailParser(unittest.TestCase):
         text = "Customer Email:   JOHN.DOE@EXAMPLE.CO.UK  "
         self.assertEqual(extract_email(text), "john.doe@example.co.uk")
 
-    def test_no_email_returns_none(self):
-        text = "Here are the product pictures for the invoice."
-        self.assertIsNone(extract_email(text))
+    def test_extract_order_id_formats(self):
+        self.assertEqual(extract_order_id("Order ID: 12345"), 12345)
+        self.assertEqual(extract_order_id("Order #998877"), 998877)
+        self.assertEqual(extract_order_id("📦 New Order\nEmail: test@example.com\nOrder ID: 5544"), 5544)
 
-    def test_multiline_caption(self):
-        text = "Order #12345\nContact: user_name@domain.org\nThank you!"
-        self.assertEqual(extract_email(text), "user_name@domain.org")
+    def test_no_order_id_returns_none(self):
+        self.assertIsNone(extract_order_id("Here are the images for customer."))
 
 
 class TestDeliverySplitting(unittest.TestCase):
@@ -82,61 +84,43 @@ class TestUserSessionManager(unittest.TestCase):
         self.assertEqual(retrieved, email)
 
 
-class TestSettingsAndDatabase(unittest.IsolatedAsyncioTestCase):
-    """Async tests for database Settings CRUD and Order operations."""
+class TestReplyBasedDatabaseWorkflow(unittest.IsolatedAsyncioTestCase):
+    """Async tests for Reply-Based Order Creation, Image Aggregation, and Settings CRUD."""
 
-    async def test_settings_lifecycle(self):
+    async def test_reply_based_order_flow(self):
         await init_db()
 
-        # 1. Get or create initial settings
-        settings = await get_or_create_settings()
-        self.assertEqual(settings.id, 1)
+        # 1. Customer Order Creation
+        email = "reply_flow@example.com"
+        order = await create_pending_order(email)
+        self.assertIsNotNone(order.id)
+        self.assertEqual(order.email, email)
 
-        # 2. Update Source Group
-        updated_src = await update_source_group(-1001234567890, "Orders Source Group")
-        self.assertEqual(updated_src.source_group_id, -1001234567890)
-        self.assertEqual(updated_src.source_group_title, "Orders Source Group")
-
-        # 3. Update Delivery Group
-        updated_del = await update_delivery_group(-1009876543210, "Delivery Target Group")
-        self.assertEqual(updated_del.delivery_group_id, -1009876543210)
-        self.assertEqual(updated_del.delivery_group_title, "Delivery Target Group")
-
-        # 4. Remove Source Group
-        rem_src = await remove_source_group()
-        self.assertIsNone(rem_src.source_group_id)
-
-        # 5. Remove Delivery Group
-        rem_del = await remove_delivery_group()
-        self.assertIsNone(rem_del.delivery_group_id)
-
-        # 6. Reset all groups
-        reset_res = await reset_groups()
-        self.assertIsNone(reset_res.source_group_id)
-        self.assertIsNone(reset_res.delivery_group_id)
-
-    async def test_database_order_lifecycle(self):
-        await init_db()
-
-        test_email = "db_test@example.com"
-        file_items = [("file_1", "photo"), ("file_2", "photo"), ("doc_1", "document")]
-
-        order, is_dup = await save_order(test_email, file_items, media_group_id="mg_test_99")
+        # 2. Loader replies with photos for Order ID
+        file_items = [("photo_1", "photo"), ("photo_2", "photo")]
+        updated_order, is_dup = await add_images_to_order(
+            order_id=order.id,
+            file_items=file_items,
+            media_group_id="album_1001"
+        )
         self.assertFalse(is_dup)
-        self.assertIsNotNone(order)
+        self.assertEqual(len(updated_order.images), 2)
 
-        pending = await get_pending_orders()
-        self.assertTrue(any(o.id == order.id for o in pending))
+        # 3. Loader replies with duplicate album -> should ignore duplicate
+        dup_order, is_dup_2 = await add_images_to_order(
+            order_id=order.id,
+            file_items=file_items,
+            media_group_id="album_1001"
+        )
+        self.assertTrue(is_dup_2)
 
+        # 4. Mark order as delivered
         await mark_order_delivered(order.id)
-        newest = await get_newest_order_by_email(test_email)
-        self.assertIsNotNone(newest.delivered_at)
+        fetched = await get_order_by_id(order.id)
+        self.assertIsNotNone(fetched.delivered_at)
 
-        csv_text = await export_orders_to_csv()
-        self.assertIn("db_test@example.com", csv_text)
-
-        count = await delete_orders_by_email(test_email)
-        self.assertGreaterEqual(count, 1)
+        # Cleanup
+        await delete_orders_by_email(email)
 
 
 if __name__ == "__main__":

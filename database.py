@@ -1,6 +1,6 @@
 """
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
-SHA256 fingerprint deduplication, CSV export, backup/restore, and dynamic Settings management.
+Order ID mapping, SHA256 fingerprint deduplication, CSV export, backup/restore, and Settings management.
 """
 
 import os
@@ -70,10 +70,7 @@ async def init_db() -> None:
 # ==========================================
 
 async def get_or_create_settings() -> Settings:
-    """
-    Retrieves or initializes the single Settings record (id=1).
-    Avoids nested session.begin() calls to prevent transaction conflicts.
-    """
+    """Retrieves or initializes the single Settings record (id=1)."""
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
         res = await session.execute(stmt)
@@ -209,68 +206,111 @@ async def reset_groups() -> Settings:
 
 
 # ==========================================
-# Order & Image Operations
+# Reply-Based Order & Image Operations
 # ==========================================
 
-async def save_order(
-    email: str,
-    file_items: List[Tuple[str, str]],
-    media_group_id: Optional[str] = None
-) -> Tuple[Optional[Order], bool]:
-    """Saves a new Order and images using SHA256 fingerprint duplicate suppression."""
-    if not file_items:
-        return None, False
-
+async def create_pending_order(email: str) -> Order:
+    """
+    Creates a new Order record with customer email and returns the generated Order object (with Order ID).
+    """
     email_clean = email.lower().strip()
-    file_ids = [item[0] for item in file_items]
-    fingerprint = compute_fingerprint(email_clean, file_ids)
-
     async with AsyncSessionLocal() as session:
-        # Check 1: Fingerprint duplicate check
-        fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
-        fp_res = await session.execute(fp_stmt)
-        if fp_res.scalar_one_or_none():
-            logger.info(f"Duplicate upload detected via SHA256 fingerprint ({fingerprint[:10]}...). Skipped.")
-            return None, True
-
-        # Check 2: Media group ID duplicate check
-        if media_group_id:
-            mg_stmt = select(Order).where(Order.media_group_id == media_group_id)
-            mg_res = await session.execute(mg_stmt)
-            if mg_res.scalar_one_or_none():
-                logger.info(f"Duplicate upload detected via media_group_id ({media_group_id}). Skipped.")
-                return None, True
-
-        # Create new order
         new_order = Order(
             email=email_clean,
-            media_group_id=media_group_id,
-            fingerprint=fingerprint,
+            media_group_id=None,
+            fingerprint=None,
             created_at=datetime.now(timezone.utc)
         )
         session.add(new_order)
-        await session.flush()
+        await session.commit()
+        await session.refresh(new_order)
 
-        # Add Image records
+        logger.info(f"Order Created | Order ID: {new_order.id} | Email: {email_clean}")
+        return new_order
+
+
+async def get_order_by_id(order_id: int) -> Optional[Order]:
+    """Retrieves an Order record by Order ID with images eagerly loaded."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Order)
+            .options(joinedload(Order.images))
+            .where(Order.id == order_id)
+        )
+        res = await session.execute(stmt)
+        return res.unique().scalar_one_or_none()
+
+
+async def add_images_to_order(
+    order_id: int,
+    file_items: List[Tuple[str, str]],
+    media_group_id: Optional[str] = None
+) -> Tuple[Optional[Order], bool]:
+    """
+    Adds images to an existing Order by Order ID using SHA256 fingerprint duplicate protection.
+
+    Args:
+        order_id (int): Target Order ID.
+        file_items (List[Tuple[str, str]]): List of (file_id, file_type) tuples.
+        media_group_id (str, optional): Telegram Media Group ID.
+
+    Returns:
+        Tuple[Optional[Order], bool]: (Order object, is_duplicate)
+    """
+    if not file_items:
+        return None, False
+
+    async with AsyncSessionLocal() as session:
+        # Verify order exists
+        stmt = select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+        res = await session.execute(stmt)
+        order = res.unique().scalar_one_or_none()
+
+        if not order:
+            logger.warning(f"Attempted to add images to non-existent Order ID: {order_id}")
+            return None, False
+
+        file_ids = [item[0] for item in file_items]
+        fingerprint = compute_fingerprint(order.email, file_ids)
+
+        # Check duplicate fingerprint
+        fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
+        fp_res = await session.execute(fp_stmt)
+        if fp_res.scalar_one_or_none():
+            logger.info(f"Duplicate Ignored | Fingerprint duplicate for Order ID: {order_id}")
+            return order, True
+
+        # Check duplicate media group ID if present
+        if media_group_id and order.media_group_id == media_group_id:
+            logger.info(f"Duplicate Ignored | Media group duplicate for Order ID: {order_id}")
+            return order, True
+
+        # Update order fingerprint and media_group_id
+        order.fingerprint = fingerprint
+        if media_group_id:
+            order.media_group_id = media_group_id
+
+        # Determine current starting position index
+        start_pos = len(order.images)
         for idx, (file_id, file_type) in enumerate(file_items):
             img = Image(
-                order_id=new_order.id,
+                order_id=order.id,
                 telegram_file_id=file_id,
                 file_type=file_type,
-                position=idx
+                position=start_pos + idx
             )
             session.add(img)
 
         await session.commit()
 
-        # Reload with images eagerly loaded
+        # Reload eager order
         res = await session.execute(
-            select(Order).options(joinedload(Order.images)).where(Order.id == new_order.id)
+            select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
         )
-        saved_order = res.unique().scalar_one()
+        updated_order = res.unique().scalar_one()
 
-        logger.info(f"New Order saved | ID: {saved_order.id} | Email: {email_clean} | Images: {len(file_items)}")
-        return saved_order, False
+        logger.info(f"Album Completed | Order ID: {updated_order.id} | Images Added: {len(file_items)} | Total: {len(updated_order.images)}")
+        return updated_order, False
 
 
 async def get_newest_order_by_email(email: str) -> Optional[Order]:
@@ -312,7 +352,7 @@ async def mark_order_delivered(order_id: int) -> None:
         )
         await session.execute(stmt)
         await session.commit()
-        logger.info(f"Order {order_id} marked as delivered.")
+        logger.info(f"Delivery Completed | Order ID: {order_id} marked as delivered.")
 
 
 async def get_pending_orders() -> List[Order]:
@@ -389,12 +429,12 @@ async def export_orders_to_csv() -> str:
 
         output = io.StringIO()
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(["Email", "Images", "Created", "Delivered"])
+        writer.writerow(["Order ID", "Email", "Images", "Created", "Delivered"])
 
         for o in orders:
             created_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S")
             delivered_str = o.delivered_at.strftime("%Y-%m-%d %H:%M:%S") if o.delivered_at else "Pending"
-            writer.writerow([o.email, len(o.images), created_str, delivered_str])
+            writer.writerow([o.id, o.email, len(o.images), created_str, delivered_str])
 
         return output.getvalue()
 
