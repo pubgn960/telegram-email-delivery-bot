@@ -3,6 +3,7 @@ Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
 Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
+Ignore Super Admin & Delivery User Messages in Client Group,
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS and AUTH_USERS_CACHE for zero-database-query filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH]).
@@ -77,7 +78,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     Monitors messages in Group 1 (Client Group).
     Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
-    When a customer sends an order message containing at least one order detection keyword:
+    Ignores messages sent by Super Admins and Delivery Users.
+    When a normal customer sends an order message containing at least one order detection keyword:
     1. Checks for existing pending orders (Duplicate Order Detection). If duplicate, prompts customer with inline buttons (Place Again / Cancel).
     2. Registers new Order in DB with status 'Pending'.
     3. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
@@ -85,6 +87,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     message = update.effective_message
     chat = update.effective_chat
+    user = update.effective_user
 
     if not message or not chat:
         return
@@ -100,6 +103,16 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if chat.id != configured_client_id:
         logger.debug(f"[CLIENT] Ignored message in chat {chat.id} ({chat.title}); configured Client Group ID is {configured_client_id}.")
         return
+
+    # Ignore Super Admin & Delivery User Messages in Client Group
+    user_id = user.id if user else None
+    if user_id:
+        if is_super_admin(user_id):
+            logger.info(f"[CLIENT] Ignored Super Admin message. User ID: {user_id}")
+            return
+        if is_delivery_user(user_id):
+            logger.info(f"[CLIENT] Ignored Delivery User message. User ID: {user_id}")
+            return
 
     text_content = message.text or message.caption or ""
     if not text_content:
@@ -196,16 +209,22 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors edited messages in Group 1 (Client Group).
-    When a customer edits their order message, informs the customer that the order will be placed manually.
+    When a normal customer edits their order message, informs the customer that the order will be placed manually.
+    Ignores edits from Super Admins and Delivery Users.
     """
     message = update.edited_message or update.effective_message
     chat = update.effective_chat
+    user = update.effective_user
 
     if not message or not chat:
         return
 
     configured_client_id = BOT_SETTINGS["source_group_id"]
     if not configured_client_id or chat.id != configured_client_id:
+        return
+
+    user_id = user.id if user else None
+    if user_id and (is_super_admin(user_id) or is_delivery_user(user_id)):
         return
 
     logger.info(f"[CLIENT] Customer edited message {message.message_id} in Client Group {chat.id}.")

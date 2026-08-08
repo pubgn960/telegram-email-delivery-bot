@@ -5,22 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-08-09
+
+### Added & Changed
+- **Ignore Super Admin & Delivery User Messages in Client Group**:
+  - Updated `source_group_handler` and `edited_message_handler` to filter out messages sent by Super Admins (`is_super_admin(user_id)`) and Delivery Users (`is_delivery_user(user_id)`).
+  - Super Admin messages in Client Group are ignored completely without keyword detection, order creation, forwarding, duplicate checking, or database modification.
+    - Logged: `[CLIENT] Ignored Super Admin message. User ID: 1573531032`
+  - Delivery User messages in Client Group are ignored completely.
+    - Logged: `[CLIENT] Ignored Delivery User message. User ID: <user_id>`
+  - Only messages from normal customers (not Super Admin and not Delivery User) are processed by the order detection workflow.
+
 ## [1.12.0] - 2026-08-09
 
 ### Added & Changed
 - **Role-Based User Management (`authorized_users`)**:
   - Implemented `AuthorizedUser` model and `authorized_users` database table storing user IDs, roles (`'admin'` or `'delivery'`), and timestamps.
-  - Pre-loaded authorized users into RAM (`AUTH_USERS_CACHE`) on bot startup during `post_init()`.
-  - Super Admin (`1573531032`) has full access to all commands, configuration, database management, statistics, and user management.
+  - Super Admin (`1573531032`) has full access to all bot commands, configuration, database management, statistics, and user management.
   - Seeded default Delivery Users (`1078400998`, `1858358195`).
 - **New Super Admin Commands**:
   - `/user delivery add <telegram_user_id>`: Adds a delivery user.
   - `/user delivery remove <telegram_user_id>`: Removes a delivery user.
   - `/users`: Displays list of Super Admins and Delivery Users.
-- **Permission Rules & Security**:
-  - Delivery Users are restricted strictly to the Loader Group workflow (replying to orders and uploading images).
-  - Attempting to run admin commands when unauthorized triggers: `⛔ You are not authorized to use this command.`
-  - Attempting to deliver orders when unauthorized triggers: `⛔ You are not authorized to deliver orders.`
 
 ## [1.11.0] - 2026-08-09
 

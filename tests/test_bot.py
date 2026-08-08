@@ -3,6 +3,7 @@ Unit test suite for Telegram Email Image Delivery Bot.
 Tests email, Order ID, package extraction, keyword detection, caption email overrides,
 wrong details workflow, duplicate pending order detection, album splitting, SHA256 fingerprinting, user sessions,
 BOT_SETTINGS cache, Role-Based User Management (AUTH_USERS_CACHE, Super Admin, Delivery Users),
+Ignoring Super Admin & Delivery User messages in Client Group,
 and two-group reply-based DB operations.
 """
 
@@ -41,6 +42,28 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestIgnoreAdminAndDeliveryUserMessages(unittest.IsolatedAsyncioTestCase):
+    """Tests ignoring Super Admin and Delivery User messages in Client Group."""
+
+    async def test_admin_and_delivery_user_detection(self):
+        await init_db()
+
+        # Super Admin check
+        admin_uid = 1573531032
+        self.assertTrue(is_super_admin(admin_uid))
+
+        # Delivery User checks
+        del_uid_1 = 1078400998
+        del_uid_2 = 1858358195
+        self.assertTrue(is_delivery_user(del_uid_1))
+        self.assertTrue(is_delivery_user(del_uid_2))
+
+        # Normal Customer check
+        cust_uid = 987654321
+        self.assertFalse(is_super_admin(cust_uid))
+        self.assertFalse(is_delivery_user(cust_uid))
 
 
 class TestRoleBasedUserManagement(unittest.IsolatedAsyncioTestCase):
