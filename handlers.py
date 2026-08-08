@@ -1,8 +1,8 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
-Telegram Reaction handling (👍 order received, ❤️ delivery completed), and Admin Commands.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [SOURCE], [DELIVERY_GROUP]).
+Keyword-Based Order Detection (keywords.py), Telegram Reactions, and Admin Commands.
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
 """
 
 import io
@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 
 from config import Config
+from keywords import contains_order_keyword
 from email_parser import extract_email, extract_order_id, extract_package
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
@@ -62,7 +63,7 @@ logger = logging.getLogger(__name__)
 async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in Group 1 (Client Group).
-    When a customer sends an order message containing an email:
+    When a customer sends an order message containing at least one order detection keyword:
     1. Registers new Order in DB with status 'Pending'.
     2. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
     3. Adds 👍 reaction to original customer order message.
@@ -92,13 +93,15 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.debug(f"[CLIENT] Message {message.message_id} in Client Group has no text/caption content.")
         return
 
-    email = extract_email(text_content)
-    if not email:
-        logger.debug(f"[CLIENT] Message {message.message_id} in Client Group does not contain a valid email address.")
+    # Keyword-Based Order Detection
+    matched, keyword = contains_order_keyword(text_content)
+    if not matched:
+        logger.info("[DETECTOR] No keyword found. Message ignored.")
         return
 
-    logger.info(f"[CLIENT] New order detected for email '{email}' in Client Group {chat.id} (Msg ID: {message.message_id})")
+    logger.info(f"[DETECTOR] Keyword matched: {keyword}")
 
+    email = extract_email(text_content) or f"order_{message.message_id}@customer.com"
     package_desc = extract_package(text_content)
 
     # 1. Create Pending Order in DB
@@ -128,6 +131,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
             await set_order_loader_message_id(order.id, forwarded_msg.message_id)
             logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
+            logger.info("[DETECTOR] Order forwarded.")
         except Exception as e:
             logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
     else:

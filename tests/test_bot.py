@@ -1,12 +1,13 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
-Tests email, Order ID, and package extraction, album splitting, SHA256 fingerprinting,
-user sessions, and two-group reply-based DB operations.
+Tests email, Order ID, package extraction, keyword detection, album splitting,
+SHA256 fingerprinting, user sessions, and two-group reply-based DB operations.
 """
 
 import unittest
 import asyncio
 from email_parser import extract_email, extract_order_id, extract_package
+from keywords import contains_order_keyword
 from delivery import chunk_list
 from media_collector import user_session_manager
 from database import (
@@ -29,6 +30,24 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestKeywordDetector(unittest.TestCase):
+    """Tests keyword-based order detection."""
+
+    def test_keyword_matches(self):
+        # Match cases
+        self.assertTrue(contains_order_keyword("10800 CP\nabc@gmail.com")[0])
+        self.assertTrue(contains_order_keyword("Login:\ntest@hotmail.com")[0])
+        self.assertTrue(contains_order_keyword("UID:\n123456\nEmail:\nabc@outlook.com")[0])
+        self.assertTrue(contains_order_keyword("Login: test+1234")[0])
+        self.assertTrue(contains_order_keyword("myemail@yahoo.co.pk")[0])
+
+    def test_keyword_ignores(self):
+        # Ignore cases
+        self.assertFalse(contains_order_keyword("Need CP")[0])
+        self.assertFalse(contains_order_keyword("Hello")[0])
+        self.assertFalse(contains_order_keyword("10800 CP")[0])
 
 
 class TestEmailOrderPackageParser(unittest.TestCase):
