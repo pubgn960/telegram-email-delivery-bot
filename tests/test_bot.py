@@ -7,6 +7,7 @@ Ignoring Super Admin & Delivery User messages in Client Group,
 Group Category Routing System (v1.2: Category A, Category B, Payment Review, Approve, Reject),
 Multi-Loader Approval System (Loader CRUD, LOADERS_CACHE, Multi-Loader Assignment),
 Telegram BotCommand Validation (validate_bot_command),
+Loader Add Wizard state isolation (LOADER_ADD_SESSION),
 and two-group reply-based DB operations.
 """
 
@@ -20,6 +21,7 @@ from delivery import chunk_list
 from media_collector import user_session_manager
 from utils import is_super_admin, is_delivery_user
 from main import validate_bot_command
+from handlers import LOADER_ADD_SESSION
 from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
@@ -59,6 +61,21 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestLoaderWizardState(unittest.TestCase):
+    """Tests Loader Add Wizard state isolation."""
+
+    def test_session_isolation(self):
+        LOADER_ADD_SESSION.clear()
+        self.assertNotIn(12345, LOADER_ADD_SESSION)
+
+        # User 1 initiates wizard
+        LOADER_ADD_SESSION[12345] = {"step": 1, "chat_id": -100111}
+        self.assertIn(12345, LOADER_ADD_SESSION)
+        self.assertNotIn(67890, LOADER_ADD_SESSION)
+
+        LOADER_ADD_SESSION.clear()
 
 
 class TestBotCommandValidation(unittest.TestCase):

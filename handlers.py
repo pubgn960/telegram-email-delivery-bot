@@ -82,7 +82,7 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-# Temporary memory state for interactive /loaderadd step-by-step wizard
+# Temporary memory state for interactive /loaderadd step-by-step wizard (user_id -> session dict)
 LOADER_ADD_SESSION: dict = {}
 
 
@@ -778,6 +778,7 @@ async def loaderadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     user = update.effective_user
+    chat = update.effective_chat
     uid = user.id if user else None
     args = context.args or []
 
@@ -785,25 +786,58 @@ async def loaderadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         group_id = int(args[0])
         loader_name = " ".join(args[1:])
         await add_loader(group_id, loader_name)
+        LOADER_ADD_SESSION.pop(uid, None)
         await update.effective_message.reply_text("✅ Loader Added Successfully")
         return
 
-    # Interactive Step-by-Step wizard
-    LOADER_ADD_SESSION[uid] = {"step": 1}
-    await update.effective_message.reply_text("Send Loader Group ID")
+    # Interactive Step-by-Step wizard reserved strictly for this admin user
+    if uid:
+        LOADER_ADD_SESSION[uid] = {
+            "step": 1,
+            "chat_id": chat.id if chat else None,
+            "created_at": datetime.now(timezone.utc)
+        }
+        await update.effective_message.reply_text("Send Loader Group ID")
 
 
 async def loader_text_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles text input during interactive /loaderadd step-by-step wizard."""
+    """
+    Handles text input during interactive /loaderadd step-by-step wizard.
+    Strictly restricted to the specific admin user who initiated /loaderadd.
+    Silently bypasses all messages if user has no active wizard session.
+    """
     user = update.effective_user
     message = update.effective_message
+    chat = update.effective_chat
 
-    if not user or user.id not in LOADER_ADD_SESSION:
+    # Rule 1 & 2: Immediately return without replying or consuming if no active session exists for user
+    if not user or not message or user.id not in LOADER_ADD_SESSION:
         return
 
     session = LOADER_ADD_SESSION[user.id]
-    step = session.get("step", 1)
+
+    # Rule 5: Match initiating chat context
+    if chat and session.get("chat_id") and chat.id != session.get("chat_id"):
+        return
+
     text = (message.text or "").strip()
+
+    # Rule 4: Cancel wizard if admin issues a command or cancels
+    if text.startswith("/") or text.lower() in ("cancel", "exit"):
+        LOADER_ADD_SESSION.pop(user.id, None)
+        logger.info(f"[LOADER_MGMT] Cancelled /loaderadd wizard for user {user.id}.")
+        if text.lower() in ("cancel", "exit"):
+            await message.reply_text("❌ Loader add wizard cancelled.")
+        return
+
+    # Rule 4: Timeout session after 5 minutes (300 seconds)
+    created_at = session.get("created_at")
+    if created_at and (datetime.now(timezone.utc) - created_at).total_seconds() > 300:
+        LOADER_ADD_SESSION.pop(user.id, None)
+        logger.info(f"[LOADER_MGMT] Timed out /loaderadd wizard for user {user.id}.")
+        return
+
+    step = session.get("step", 1)
 
     if step == 1:
         if not text.lstrip("-").isdigit():
@@ -824,10 +858,15 @@ async def loader_text_wizard_handler(update: Update, context: ContextTypes.DEFAU
             LOADER_ADD_SESSION.pop(user.id, None)
             return
 
-        await add_loader(group_id, loader_name)
-        LOADER_ADD_SESSION.pop(user.id, None)
-        await message.reply_text("✅ Loader Added Successfully")
-        return
+        try:
+            await add_loader(group_id, loader_name)
+            await message.reply_text("✅ Loader Added Successfully")
+        except Exception as e:
+            logger.exception(f"[LOADER_MGMT] Failed to add loader: {e}")
+            await message.reply_text(f"❌ Failed to add loader: {e}")
+        finally:
+            # Rule 4: Completely remove wizard state after completion
+            LOADER_ADD_SESSION.pop(user.id, None)
 
 
 async def loaderlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

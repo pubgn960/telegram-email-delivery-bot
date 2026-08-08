@@ -5,30 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-08-09
+
+### Fixed & Changed
+- **Loader Add Wizard State Isolation Fix (`loader_text_wizard_handler`)**:
+  - Restricts `loader_text_wizard_handler` execution strictly to admin users with an active wizard session in `LOADERS_ADD_SESSION[user_id]`.
+  - Immediately returns without replying or consuming messages if no active wizard session exists for the sending user.
+  - Matches the initiating chat context (`chat_id`) so text sent in other chats is ignored.
+  - Completely clears wizard state (`LOADER_ADD_SESSION.pop(user_id, None)`) upon wizard completion, user cancellation (`/cancel`, `exit`), 5-minute timeout (300s), or errors.
+  - Ensures normal group chatter, customer orders, loader replies, `wrong` workflow, delivery captions, and commands bypass the wizard completely without interference.
+
 ## [1.19.0] - 2026-08-09
 
 ### Fixed & Changed
 - **Bug 1 Fix - Duplicate Order "Place Again" (`duplicate_order_callback_handler`)**:
   - Pressing `✅ Place Again` creates a brand new `Order` in database with a new Order ID.
-  - Automatically checks Group Category (`A` vs `B`).
-  - **Category A**: Copies original customer message to Loader Group, saves `loader_message_id`, sets status `Pending`.
-  - **Category B**: Sends review notification card to Payment Review Group (`-1004441603990`) with `[✅ Accept]` & `[❌ Reject]` buttons, sets status `Pending Approval`.
-  - Edits duplicate prompt message to: `✅ New Order Created\nOrder #xxx`.
 - **Bug 2 Fix - Category B Loader Selection (`category_b_approval_callback_handler`)**:
-  - Loads loader information from DB if cache is empty.
-  - Copies original customer message to selected loader group.
-  - Saves `loader_group_id`, `loader_message_id`, and sets `status = "Pending"`.
-  - Edits review card to: `✅ Order Approved\n\nLoader:\nPakistan Loader\n\nOrder #xxx`.
-- **Logging Improvements**:
-  - Replaced silent `except:` blocks with `logger.exception(...)` for complete stack traces.
-  - Added structured logs: `[LOADER] Selected Loader: ...`, `[LOADER] Copy Success`, `[LOADER] Copy Failed`.
+  - Copies original customer message to selected loader group, updates DB status and loader IDs.
 
 ## [1.18.0] - 2026-08-09
 
 ### Fixed & Changed
 - **Telegram BotCommand Menu Registration Fix**:
   - Replaced uppercase commands in `BotCommand` registration (`"A"` and `"B"`) with lowercase commands (`"a"` and `"b"`).
-  - Maintained command handlers for both lowercase and uppercase aliases.
 
 ## [1.17.0] - 2026-08-09
 
