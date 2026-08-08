@@ -1,7 +1,8 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
 Initializes database, configures handlers, sets Telegram '/' UI command menu,
-populates global in-memory BOT_SETTINGS and AUTH_USERS_CACHE on startup, starts background tasks, and runs bot polling.
+populates global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE on startup,
+starts background tasks, and runs bot polling.
 """
 
 import sys
@@ -25,6 +26,13 @@ from handlers import (
     edited_message_handler,
     delivery_group_handler,
     duplicate_order_callback_handler,
+    category_a_command,
+    category_b_command,
+    category_check_command,
+    remove_category_command,
+    paymentgroup_command,
+    approve_order_command,
+    reject_order_command,
     user_command,
     users_command,
     start_command,
@@ -79,7 +87,7 @@ async def post_init(application: Application) -> None:
     logger.info("Initializing database schema...")
     await init_db()
 
-    # Load Settings & Authorized Users from DB once on startup and populate in-memory caches
+    # Load Settings, Authorized Users, and Client Groups from DB once on startup into RAM
     await reload_bot_settings_cache()
     await reload_auth_users_cache()
 
@@ -87,6 +95,13 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("source", "Mark current group as Client Group"),
         BotCommand("delivery", "Mark current group as Loader Group"),
+        BotCommand("paymentgroup", "Mark group as Payment Review Group"),
+        BotCommand("A", "Set Client Group to Category A (Trusted)"),
+        BotCommand("B", "Set Client Group to Category B (Payment Review)"),
+        BotCommand("category", "View current group category"),
+        BotCommand("removecategory", "Remove group category"),
+        BotCommand("approve", "Approve Category B order"),
+        BotCommand("reject", "Reject Category B order"),
         BotCommand("groups", "Show group configuration status"),
         BotCommand("status", "View bot status & diagnostics"),
         BotCommand("user", "Manage delivery users"),
@@ -132,7 +147,7 @@ def main() -> None:
         logger.critical("BOT_TOKEN is missing! Please configure it in .env file or environment variables.")
         sys.exit(1)
 
-    logger.info("Starting Telegram Email Image Delivery Bot v1.0.0...")
+    logger.info("Starting Telegram Email Image Delivery Bot v1.2.0...")
 
     # Build python-telegram-bot application
     application = (
@@ -146,6 +161,13 @@ def main() -> None:
     application.add_handler(CommandHandler("setup", setup_command))
     application.add_handler(CommandHandler("source", source_command))
     application.add_handler(CommandHandler("delivery", delivery_command))
+    application.add_handler(CommandHandler("paymentgroup", paymentgroup_command))
+    application.add_handler(CommandHandler("A", category_a_command))
+    application.add_handler(CommandHandler("B", category_b_command))
+    application.add_handler(CommandHandler("category", category_check_command))
+    application.add_handler(CommandHandler("removecategory", remove_category_command))
+    application.add_handler(CommandHandler("approve", approve_order_command))
+    application.add_handler(CommandHandler("reject", reject_order_command))
     application.add_handler(CommandHandler("groups", groups_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("removesource", removesource_command))

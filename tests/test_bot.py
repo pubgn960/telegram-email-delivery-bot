@@ -4,6 +4,7 @@ Tests email, Order ID, package extraction, keyword detection, caption email over
 wrong details workflow, duplicate pending order detection, album splitting, SHA256 fingerprinting, user sessions,
 BOT_SETTINGS cache, Role-Based User Management (AUTH_USERS_CACHE, Super Admin, Delivery Users),
 Ignoring Super Admin & Delivery User messages in Client Group,
+Group Category Routing System (v1.2: Category A, Category B, Payment Review, Approve, Reject),
 and two-group reply-based DB operations.
 """
 
@@ -17,9 +18,15 @@ from utils import is_super_admin, is_delivery_user
 from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
+    CLIENT_GROUPS_CACHE,
     init_db,
     reload_bot_settings_cache,
     reload_auth_users_cache,
+    set_client_group_category,
+    remove_client_group_category,
+    get_client_group_category,
+    update_payment_review_group,
+    update_order_status,
     add_authorized_user,
     remove_authorized_user,
     get_all_authorized_users,
@@ -42,6 +49,47 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestGroupCategoryRouting(unittest.IsolatedAsyncioTestCase):
+    """Tests Group Category Routing (v1.2) - Category A, Category B, Payment Review, Approve, Reject."""
+
+    async def test_category_assignment_and_cache(self):
+        await init_db()
+
+        chat_id_a = -100555444333222
+        chat_id_b = -100999888777666
+
+        # Set Category A
+        await set_client_group_category(chat_id_a, "Pakistan CODM Shop A", "A")
+        self.assertEqual(await get_client_group_category(chat_id_a), "A")
+
+        # Set Category B
+        await set_client_group_category(chat_id_b, "Pakistan CODM Shop B", "B")
+        self.assertEqual(await get_client_group_category(chat_id_b), "B")
+
+        # Test Payment Review Group update
+        pay_chat_id = -100111222333444
+        await update_payment_review_group(pay_chat_id, "Payment Review Group")
+        self.assertEqual(BOT_SETTINGS["payment_review_group_id"], pay_chat_id)
+
+        # Test Category B order creation & status updates
+        email = "catb_test@example.com"
+        order = await create_order(email, client_chat_id=chat_id_b, original_message_id=101, status="Pending Payment")
+        self.assertEqual(order.status, "Pending Payment")
+
+        # Approve Order
+        approved_order = await update_order_status(order.id, "Approved")
+        self.assertEqual(approved_order.status, "Approved")
+
+        # Reject Order
+        rejected_order = await update_order_status(order.id, "Rejected")
+        self.assertEqual(rejected_order.status, "Rejected")
+
+        # Remove Category
+        await remove_client_group_category(chat_id_a)
+        await remove_client_group_category(chat_id_b)
+        await delete_orders_by_email(email)
 
 
 class TestIgnoreAdminAndDeliveryUserMessages(unittest.IsolatedAsyncioTestCase):

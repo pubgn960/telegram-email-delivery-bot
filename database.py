@@ -2,7 +2,7 @@
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
 backup/restore, and detailed statistics dashboard.
-Includes global in-memory BOT_SETTINGS and AUTH_USERS_CACHE for high-performance zero-query permission filtering.
+Includes global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE for high-performance zero-query filtering.
 """
 
 import os
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import joinedload
 
 from config import Config
-from models import Base, Order, Image, Settings, AuthorizedUser
+from models import Base, Order, Image, Settings, AuthorizedUser, ClientGroup
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,17 @@ AsyncSessionLocal = async_sessionmaker(
 BOT_SETTINGS: Dict[str, Any] = {
     "source_group_id": None,
     "delivery_group_id": None,
+    "payment_review_group_id": None,
     "source_group_title": None,
-    "delivery_group_title": None
+    "delivery_group_title": None,
+    "payment_review_group_title": None
 }
 
 # Global in-memory user permission cache: telegram_user_id -> role ('admin' or 'delivery')
 AUTH_USERS_CACHE: Dict[int, str] = {}
+
+# Global in-memory client group category cache: chat_id -> category ('A' or 'B')
+CLIENT_GROUPS_CACHE: Dict[int, str] = {}
 
 
 async def dispose_engine() -> None:
@@ -68,7 +73,7 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
 
 
 async def init_db() -> None:
-    """Initializes database schema and default Settings and AuthorizedUsers records."""
+    """Initializes database schema and default Settings, AuthorizedUsers, and ClientGroups records."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -76,6 +81,7 @@ async def init_db() -> None:
 
     await get_or_create_settings()
     await reload_auth_users_cache()
+    await reload_bot_settings_cache()
 
 
 # ==========================================
@@ -96,6 +102,8 @@ async def get_or_create_settings() -> Settings:
                 source_group_title=None,
                 delivery_group_id=None,
                 delivery_group_title=None,
+                payment_review_group_id=None,
+                payment_review_group_title=None,
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -113,26 +121,42 @@ async def get_current_settings() -> Settings:
 
 async def reload_bot_settings_cache() -> Dict[str, Any]:
     """
-    Loads Settings record from database once and populates the global BOT_SETTINGS in-memory cache.
+    Loads Settings and ClientGroups records from database once and populates global in-memory caches.
     Outputs structured [CACHE] logs on startup.
     """
     settings = await get_or_create_settings()
     BOT_SETTINGS["source_group_id"] = settings.source_group_id
     BOT_SETTINGS["delivery_group_id"] = settings.delivery_group_id
+    BOT_SETTINGS["payment_review_group_id"] = getattr(settings, "payment_review_group_id", None)
     BOT_SETTINGS["source_group_title"] = settings.source_group_title
     BOT_SETTINGS["delivery_group_title"] = settings.delivery_group_title
+    BOT_SETTINGS["payment_review_group_title"] = getattr(settings, "payment_review_group_title", None)
+
+    # Pre-load Client Groups into CLIENT_GROUPS_CACHE in RAM
+    async with AsyncSessionLocal() as session:
+        stmt = select(ClientGroup)
+        res = await session.execute(stmt)
+        groups = list(res.scalars().all())
+
+        CLIENT_GROUPS_CACHE.clear()
+        for g in groups:
+            CLIENT_GROUPS_CACHE[g.chat_id] = g.category
+
+    if settings.source_group_id and settings.source_group_id not in CLIENT_GROUPS_CACHE:
+        CLIENT_GROUPS_CACHE[settings.source_group_id] = "A"
 
     src_id = BOT_SETTINGS["source_group_id"]
     del_id = BOT_SETTINGS["delivery_group_id"]
+    pay_id = BOT_SETTINGS["payment_review_group_id"]
 
     logger.info("[CACHE]")
     if src_id:
         logger.info(f"[CACHE] Source Group Loaded: {src_id}")
     if del_id:
         logger.info(f"[CACHE] Delivery Group Loaded: {del_id}")
-
-    if not src_id and not del_id:
-        logger.info("[CACHE] No groups configured.")
+    if pay_id:
+        logger.info(f"[CACHE] Payment Review Group Loaded: {pay_id}")
+    logger.info(f"[CACHE] Loaded {len(CLIENT_GROUPS_CACHE)} Client Group Category mapping(s) into memory.")
 
     return BOT_SETTINGS
 
@@ -155,6 +179,8 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
                 source_group_title=title,
                 delivery_group_id=None,
                 delivery_group_title=None,
+                payment_review_group_id=None,
+                payment_review_group_title=None,
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -190,6 +216,8 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
                 source_group_title=None,
                 delivery_group_id=chat_id,
                 delivery_group_title=title,
+                payment_review_group_id=None,
+                payment_review_group_title=None,
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -204,6 +232,41 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
     # Immediately refresh in-memory cache
     await reload_bot_settings_cache()
     logger.info(f"[DELIVERY_GROUP] Delivery Group saved: {chat_id}")
+    return settings
+
+
+async def update_payment_review_group(chat_id: int, title: str) -> Settings:
+    """
+    Updates the Payment Review Group configuration in database and refreshes BOT_SETTINGS cache.
+    """
+    logger.info(f"[PAYMENT] Saving Payment Review Group: {chat_id}")
+    async with AsyncSessionLocal() as session:
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
+
+        if not settings:
+            settings = Settings(
+                id=1,
+                source_group_id=None,
+                source_group_title=None,
+                delivery_group_id=None,
+                delivery_group_title=None,
+                payment_review_group_id=chat_id,
+                payment_review_group_title=title,
+                updated_at=datetime.now(timezone.utc)
+            )
+            session.add(settings)
+        else:
+            settings.payment_review_group_id = chat_id
+            settings.payment_review_group_title = title
+            settings.updated_at = datetime.now(timezone.utc)
+
+        await session.commit()
+        logger.info("[PAYMENT] Database commit successful.")
+
+    await reload_bot_settings_cache()
+    logger.info(f"[PAYMENT] Payment Review Group saved: {chat_id}")
     return settings
 
 
@@ -253,11 +316,103 @@ async def reset_groups() -> Settings:
             settings.source_group_title = None
             settings.delivery_group_id = None
             settings.delivery_group_title = None
+            settings.payment_review_group_id = None
+            settings.payment_review_group_title = None
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
     await reload_bot_settings_cache()
     return await get_current_settings()
+
+
+# ==========================================
+# Client Group Category Routing Operations
+# ==========================================
+
+async def set_client_group_category(chat_id: int, title: str, category: str) -> ClientGroup:
+    """
+    Sets or updates Client Group category ('A' or 'B') in DB and refreshes CLIENT_GROUPS_CACHE.
+    Category A: Trusted Groups (Direct to Loader Group)
+    Category B: Payment Required Groups (Forward to Payment Review Group)
+    """
+    cat_clean = category.upper().strip()
+    if cat_clean not in ("A", "B"):
+        cat_clean = "A"
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(ClientGroup).where(ClientGroup.chat_id == chat_id)
+        res = await session.execute(stmt)
+        group = res.scalar_one_or_none()
+
+        now = datetime.now(timezone.utc)
+        if not group:
+            group = ClientGroup(
+                chat_id=chat_id,
+                group_name=title,
+                category=cat_clean,
+                created_at=now,
+                updated_at=now
+            )
+            session.add(group)
+        else:
+            group.group_name = title
+            group.category = cat_clean
+            group.updated_at = now
+
+        await session.commit()
+
+    # Ensure source_group_id is set if not already set
+    await update_source_group(chat_id, title)
+    await reload_bot_settings_cache()
+
+    logger.info(f"[CATEGORY] Group assigned to Category {cat_clean}. Chat ID: {chat_id}")
+    return group
+
+
+async def remove_client_group_category(chat_id: int) -> bool:
+    """Removes Client Group category assignment from DB and refreshes cache."""
+    async with AsyncSessionLocal() as session:
+        stmt = delete(ClientGroup).where(ClientGroup.chat_id == chat_id)
+        res = await session.execute(stmt)
+        await session.commit()
+        count = res.rowcount
+
+    await reload_bot_settings_cache()
+    logger.info(f"[CATEGORY] Group category removed for Chat ID: {chat_id}")
+    return count > 0
+
+
+async def get_client_group_category(chat_id: int) -> str:
+    """Gets category ('A' or 'B') for a chat ID from cache or DB."""
+    if chat_id in CLIENT_GROUPS_CACHE:
+        return CLIENT_GROUPS_CACHE[chat_id]
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(ClientGroup.category).where(ClientGroup.chat_id == chat_id)
+        res = await session.execute(stmt)
+        cat = res.scalar_one_or_none()
+        if cat:
+            CLIENT_GROUPS_CACHE[chat_id] = cat
+            return cat
+
+    return "A"
+
+
+async def update_order_status(order_id: int, status: str) -> Optional[Order]:
+    """Updates status for an Order by ID."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(status=status)
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+        res = await session.execute(
+            select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+        )
+        return res.unique().scalar_one_or_none()
 
 
 # ==========================================
@@ -430,7 +585,7 @@ async def get_pending_order_by_email(email: str) -> Optional[Order]:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.email == email_clean, Order.status == "Pending")
+            .where(Order.email == email_clean, Order.status.in_(["Pending", "Pending Payment"]))
             .order_by(Order.created_at.desc())
         )
         res = await session.execute(stmt)
@@ -563,12 +718,12 @@ async def cancel_order(order_id: int) -> Tuple[Optional[Order], bool]:
 
 
 async def get_pending_orders() -> List[Order]:
-    """Retrieves all orders in Pending status."""
+    """Retrieves all orders in Pending or Pending Payment status."""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.status == "Pending")
+            .where(Order.status.in_(["Pending", "Pending Payment"]))
             .order_by(Order.created_at.desc())
         )
         result = await session.execute(stmt)
@@ -631,7 +786,7 @@ async def check_order_timeouts(timeout_hours: int = 24) -> int:
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
     async with AsyncSessionLocal() as session:
-        stmt = select(Order).where(Order.status == "Pending", Order.created_at < cutoff)
+        stmt = select(Order).where(Order.status.in_(["Pending", "Pending Payment"]), Order.created_at < cutoff)
         res = await session.execute(stmt)
         expired_orders = list(res.scalars().all())
 
@@ -657,7 +812,7 @@ async def get_detailed_stats() -> Dict[str, Any]:
     """Computes comprehensive statistics for the bot dashboard."""
     async with AsyncSessionLocal() as session:
         total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
-        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Pending"))).scalar() or 0
+        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.status.in_(["Pending", "Pending Payment"])))).scalar() or 0
         delivered_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Delivered"))).scalar() or 0
         cancelled_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Cancelled"))).scalar() or 0
 

@@ -1,7 +1,7 @@
 """
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
-Defines schemas and indexes for Orders, Images, Settings, and AuthorizedUsers tables
-supporting two-group reply-based workflow and role-based user management.
+Defines schemas and indexes for Orders, Images, Settings, AuthorizedUsers, and ClientGroups tables
+supporting two-group reply-based workflow, role-based user management, and Group Category Routing (v1.2).
 """
 
 from datetime import datetime, timezone
@@ -21,6 +21,7 @@ class Settings(Base):
     Maintains a single record (id=1).
     source_group_id: Client Group ID (where customers send orders)
     delivery_group_id: Loader Group ID (where bot forwards orders & loaders reply)
+    payment_review_group_id: Payment Review Group ID (for Category B orders)
     """
 
     __tablename__ = "settings"
@@ -30,6 +31,8 @@ class Settings(Base):
     source_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     delivery_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     delivery_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    payment_review_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    payment_review_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -38,7 +41,36 @@ class Settings(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Settings(id={self.id}, client_group={self.source_group_id}, loader_group={self.delivery_group_id})>"
+        return f"<Settings(id={self.id}, client_group={self.source_group_id}, loader_group={self.delivery_group_id}, payment_group={self.payment_review_group_id})>"
+
+
+class ClientGroup(Base):
+    """
+    Stores Client Group category assignments ('A' or 'B').
+    Category A: Trusted Groups (Direct to Loader Group)
+    Category B: Payment Required Groups (Forward to Payment Review Group)
+    """
+
+    __tablename__ = "client_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    group_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    category: Mapped[str] = mapped_column(String(10), nullable=False, default="A")  # 'A' or 'B'
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ClientGroup(chat_id={self.chat_id}, category='{self.category}')>"
 
 
 class AuthorizedUser(Base):
@@ -76,7 +108,7 @@ class Order(Base):
     client_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     original_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     loader_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Delivered, Cancelled, Expired
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Pending Payment, Approved, Rejected, Delivered, Cancelled, Expired
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     media_group_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)

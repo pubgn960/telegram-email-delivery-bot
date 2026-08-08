@@ -4,9 +4,10 @@ Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Me
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
 Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
 Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
+Group Category Routing System (v1.2: Category A vs Category B /paymentgroup, /A, /B, /category, /removecategory, /approve, /reject),
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
-Utilizes global BOT_SETTINGS and AUTH_USERS_CACHE for zero-database-query filtering.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH]).
+Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE for zero-database-query filtering.
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT]).
 """
 
 import io
@@ -29,10 +30,16 @@ from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
+    CLIENT_GROUPS_CACHE,
     AsyncSessionLocal,
     get_current_settings,
     update_source_group,
     update_delivery_group,
+    update_payment_review_group,
+    set_client_group_category,
+    remove_client_group_category,
+    get_client_group_category,
+    update_order_status,
     remove_source_group,
     remove_delivery_group,
     reset_groups,
@@ -77,13 +84,11 @@ logger = logging.getLogger(__name__)
 async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Monitors messages in Group 1 (Client Group).
-    Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
+    Validates group ID strictly using in-memory BOT_SETTINGS and CLIENT_GROUPS_CACHE without querying database.
     Ignores messages sent by Super Admins and Delivery Users.
-    When a normal customer sends an order message containing at least one order detection keyword:
-    1. Checks for existing pending orders (Duplicate Order Detection). If duplicate, prompts customer with inline buttons (Place Again / Cancel).
-    2. Registers new Order in DB with status 'Pending'.
-    3. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
-    4. Adds 👍 reaction to original customer order message.
+    Routes orders according to Group Category:
+    - Category A (Trusted Groups): Directly forwards to Loader Group.
+    - Category B (Payment Required Groups): Routes to Payment Review Group for /approve or /reject.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -92,16 +97,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not message or not chat:
         return
 
-    # Check against in-memory BOT_SETTINGS cache (Zero DB SELECT query)
-    configured_client_id = BOT_SETTINGS["source_group_id"]
+    # Check against in-memory BOT_SETTINGS and CLIENT_GROUPS_CACHE (Zero DB SELECT query)
+    is_client_group = (chat.id == BOT_SETTINGS["source_group_id"]) or (chat.id in CLIENT_GROUPS_CACHE)
 
-    if not configured_client_id:
+    if not is_client_group:
         logger.warning(f"[CLIENT] Client Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
-        return
-
-    # Must match configured Client Group
-    if chat.id != configured_client_id:
-        logger.debug(f"[CLIENT] Ignored message in chat {chat.id} ({chat.title}); configured Client Group ID is {configured_client_id}.")
         return
 
     # Ignore Super Admin & Delivery User Messages in Client Group
@@ -130,6 +130,9 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     email = extract_email(text_content) or f"order_{message.message_id}@customer.com"
     package_desc = extract_package(text_content)
 
+    # Determine Group Category ('A' or 'B')
+    category = CLIENT_GROUPS_CACHE.get(chat.id, "A")
+
     # Check Duplicate Pending Order
     existing_pending = await get_pending_order_by_email(email)
     if existing_pending:
@@ -157,41 +160,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"[CLIENT] Failed to send duplicate order prompt: {e}")
         return
 
-    # 1. Create Pending Order in DB
-    order = await create_order(
-        email=email,
-        client_chat_id=chat.id,
-        original_message_id=message.message_id,
-        package=package_desc,
-        status="Pending"
-    )
-
-    # 2. Copy Original Customer Message to Loader Group EXACTLY as received (Zero added metadata or headers)
-    loader_group_id = BOT_SETTINGS["delivery_group_id"]
-    if loader_group_id:
-        try:
-            try:
-                forwarded_msg = await context.bot.copy_message(
-                    chat_id=loader_group_id,
-                    from_chat_id=chat.id,
-                    message_id=message.message_id
-                )
-            except Exception as e_copy:
-                logger.debug(f"copy_message failed: {e_copy}. Fallback to raw text send_message.")
-                forwarded_msg = await context.bot.send_message(
-                    chat_id=loader_group_id,
-                    text=text_content
-                )
-
-            await set_order_loader_message_id(order.id, forwarded_msg.message_id)
-            logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
-            logger.info("[DETECTOR] Order forwarded.")
-        except Exception as e:
-            logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
-    else:
-        logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
-
-    # 3. Add 👍 reaction to ORIGINAL customer order message
+    # Add 👍 reaction to ORIGINAL customer order message in Client Group
     reacted = await safe_set_message_reaction(
         bot=context.bot,
         chat_id=chat.id,
@@ -204,6 +173,81 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info("[REACTION] 👍 Order received")
     else:
         logger.warning("Reaction not supported.")
+
+    if category == "B":
+        # Category B Workflow: Forward to Payment Review Group, set status 'Pending Payment'
+        order = await create_order(
+            email=email,
+            client_chat_id=chat.id,
+            original_message_id=message.message_id,
+            package=package_desc,
+            status="Pending Payment"
+        )
+
+        payment_group_id = BOT_SETTINGS["payment_review_group_id"]
+        if payment_group_id:
+            try:
+                try:
+                    await context.bot.copy_message(
+                        chat_id=payment_group_id,
+                        from_chat_id=chat.id,
+                        message_id=message.message_id
+                    )
+                except Exception:
+                    pass
+
+                card_msg = (
+                    f"💳 <b>NEW PAYMENT REVIEW ORDER</b>\n\n"
+                    f"<b>Order ID:</b> #{order.id}\n"
+                    f"<b>Group:</b> {html.escape(chat.title or 'Client Group')}\n"
+                    f"<b>Email:</b> <code>{html.escape(order.email)}</code>\n\n"
+                    f"To approve: <code>/approve {order.id}</code>\n"
+                    f"To reject: <code>/reject {order.id}</code>"
+                )
+                await context.bot.send_message(
+                    chat_id=payment_group_id,
+                    text=card_msg,
+                    parse_mode="HTML"
+                )
+                logger.info(f"[PAYMENT] Order #{order.id} routed to Payment Review Group.")
+            except Exception as e:
+                logger.error(f"[PAYMENT] Failed to route Order #{order.id} to Payment Review Group: {e}")
+        else:
+            logger.warning(f"[PAYMENT] Order #{order.id} registered as Category B, but Payment Review Group is not configured yet!")
+
+    else:
+        # Category A Workflow: Forward directly to Loader Group, set status 'Pending'
+        order = await create_order(
+            email=email,
+            client_chat_id=chat.id,
+            original_message_id=message.message_id,
+            package=package_desc,
+            status="Pending"
+        )
+
+        loader_group_id = BOT_SETTINGS["delivery_group_id"]
+        if loader_group_id:
+            try:
+                try:
+                    forwarded_msg = await context.bot.copy_message(
+                        chat_id=loader_group_id,
+                        from_chat_id=chat.id,
+                        message_id=message.message_id
+                    )
+                except Exception as e_copy:
+                    logger.debug(f"copy_message failed: {e_copy}. Fallback to raw text send_message.")
+                    forwarded_msg = await context.bot.send_message(
+                        chat_id=loader_group_id,
+                        text=text_content
+                    )
+
+                await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+                logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
+                logger.info("[DETECTOR] Order forwarded.")
+            except Exception as e:
+                logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
+        else:
+            logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
 
 
 async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,8 +263,8 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not message or not chat:
         return
 
-    configured_client_id = BOT_SETTINGS["source_group_id"]
-    if not configured_client_id or chat.id != configured_client_id:
+    is_client_group = (chat.id == BOT_SETTINGS["source_group_id"]) or (chat.id in CLIENT_GROUPS_CACHE)
+    if not is_client_group:
         return
 
     user_id = user.id if user else None
@@ -456,6 +500,165 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         bot=context.bot,
         caption_text=text_content
     )
+
+
+# ==========================================
+# Group Category Routing System Commands (v1.2)
+# ==========================================
+
+async def category_a_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /A command executed inside any Client Group by Super Admin.
+    Assigns the group to Category A (Trusted Groups).
+    """
+    if not await verify_admin_and_group(update, context):
+        return
+
+    chat = update.effective_chat
+    group_name = chat.title or "Client Group"
+
+    await set_client_group_category(chat.id, group_name, "A")
+    logger.info(f"[CATEGORY] Group assigned to Category A. Chat ID: {chat.id}")
+
+    await update.effective_message.reply_text("✅ This group has been assigned to Category A.")
+
+
+async def category_b_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /B command executed inside any Client Group by Super Admin.
+    Assigns the group to Category B (Payment Required Groups).
+    """
+    if not await verify_admin_and_group(update, context):
+        return
+
+    chat = update.effective_chat
+    group_name = chat.title or "Client Group"
+
+    await set_client_group_category(chat.id, group_name, "B")
+    logger.info(f"[CATEGORY] Group assigned to Category B. Chat ID: {chat.id}")
+
+    await update.effective_message.reply_text("✅ This group has been assigned to Category B.")
+
+
+async def category_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /category command executed inside a Client Group to check category.
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        if update.effective_message:
+            await update.effective_message.reply_text("⚠️ This command must be executed inside a Telegram Group.")
+        return
+
+    group_name = chat.title or "Client Group"
+    category = await get_client_group_category(chat.id)
+
+    reply_msg = (
+        f"Current Category\n\n"
+        f"Group:\n{group_name}\n\n"
+        f"Category:\n{category}"
+    )
+    await update.effective_message.reply_text(reply_msg)
+
+
+async def remove_category_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /removecategory command executed inside a Client Group by Super Admin.
+    """
+    if not await verify_admin_and_group(update, context):
+        return
+
+    chat = update.effective_chat
+    await remove_client_group_category(chat.id)
+
+    await update.effective_message.reply_text("✅ Group category removed successfully.")
+
+
+async def paymentgroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /paymentgroup command executed inside the private Payment Review Group by Super Admin.
+    """
+    if not await verify_admin_and_group(update, context):
+        return
+
+    chat = update.effective_chat
+    group_name = chat.title or "Payment Review Group"
+
+    await update_payment_review_group(chat.id, group_name)
+    await update.effective_message.reply_text("✅ Payment Review Group configured successfully.")
+
+
+async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /approve <order_id> command executed inside Payment Review Group (or by Super Admin).
+    Updates order status to Approved, forwards original order to Loader Group.
+    """
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.effective_message.reply_text("⚠️ Usage: <code>/approve 1025</code>", parse_mode="HTML")
+        return
+
+    order_id = int(context.args[0].lstrip("#"))
+    order = await get_order_by_id(order_id)
+
+    if not order:
+        await update.effective_message.reply_text(f"❌ Order #{order_id} not found.")
+        return
+
+    # Update order status to Approved
+    await update_order_status(order.id, "Approved")
+
+    loader_group_id = BOT_SETTINGS["delivery_group_id"]
+    if loader_group_id and order.client_chat_id and order.original_message_id:
+        try:
+            try:
+                forwarded_msg = await context.bot.copy_message(
+                    chat_id=loader_group_id,
+                    from_chat_id=order.client_chat_id,
+                    message_id=order.original_message_id
+                )
+            except Exception:
+                forwarded_msg = await context.bot.send_message(
+                    chat_id=loader_group_id,
+                    text=f"Order #{order.id} | Email: {order.email}"
+                )
+
+            await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+            logger.info(f"[PAYMENT] Order #{order.id} approved. Forwarded to Loader Group.")
+        except Exception as e:
+            logger.error(f"[PAYMENT] Failed to forward approved Order #{order.id} to Loader Group: {e}")
+    else:
+        logger.warning(f"[PAYMENT] Order #{order.id} approved, but Loader Group is not configured yet!")
+
+    await update.effective_message.reply_text(f"✅ Order #{order.id} approved and forwarded to Loader Group.")
+
+
+async def reject_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /reject <order_id> command executed inside Payment Review Group (or by Super Admin).
+    Updates order status to Rejected. Does NOT forward to Loader Group.
+    """
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.effective_message.reply_text("⚠️ Usage: <code>/reject 1025</code>", parse_mode="HTML")
+        return
+
+    order_id = int(context.args[0].lstrip("#"))
+    order = await get_order_by_id(order_id)
+
+    if not order:
+        await update.effective_message.reply_text(f"❌ Order #{order_id} not found.")
+        return
+
+    # Update order status to Rejected
+    await update_order_status(order.id, "Rejected")
+    logger.info(f"[PAYMENT] Order #{order.id} rejected.")
+
+    await update.effective_message.reply_text(f"❌ Order #{order.id} rejected.")
 
 
 # ==========================================
@@ -778,7 +981,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         created_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
         delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
         email_escaped = html.escape(order.email)
-        status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status == "Pending" else "❌")
+        status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Payment") else "❌")
         details.append(
             f"{idx}. {status_icon} Order <code>#{order.id}</code> | Status: <b>{order.status}</b>\n"
             f"    Email: <code>{email_escaped}</code> | Images: <b>{len(order.images)}</b>\n"
@@ -809,7 +1012,7 @@ async def order_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     email_escaped = html.escape(order.email)
     pkg_escaped = html.escape(order.package or "Standard Package")
 
-    status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status == "Pending" else "❌")
+    status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Payment") else "❌")
 
     msg = (
         f"📦 <b>Order Detailed Information</b>\n\n"
@@ -1046,10 +1249,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>Group Configuration:</b>\n"
         "• <code>/source</code> - Mark current group as Client Group\n"
         "• <code>/delivery</code> - Mark current group as Loader Group\n"
+        "• <code>/paymentgroup</code> - Mark current group as Payment Review Group\n"
+        "• <code>/A</code> - Set Client Group to Category A (Trusted)\n"
+        "• <code>/B</code> - Set Client Group to Category B (Payment Review)\n"
+        "• <code>/category</code> - View current group category\n"
+        "• <code>/removecategory</code> - Remove group category\n"
         "• <code>/groups</code> - Show group status\n"
         "• <code>/resetgroups</code> - Reset all group settings\n"
         "• <code>/status</code> - Display bot status\n"
         "• <code>/setup</code> - View setup guide\n\n"
+        "<b>Payment Review Workflow:</b>\n"
+        "• <code>/approve &lt;id&gt;</code> - Approve Category B order & forward to Loader\n"
+        "• <code>/reject &lt;id&gt;</code> - Reject Category B order\n\n"
         "<b>User Management:</b>\n"
         "• <code>/user delivery add &lt;id&gt;</code> - Add Delivery User\n"
         "• <code>/user delivery remove &lt;id&gt;</code> - Remove Delivery User\n"

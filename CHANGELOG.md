@@ -5,29 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-08-09
+
+### Added & Changed
+- **Group Category Routing System (v1.2)**:
+  - Added `ClientGroup` model and `client_groups` database table storing `chat_id`, `group_name`, `category` (`'A'` or `'B'`), and timestamps.
+  - Pre-loaded `ClientGroup` categories into RAM (`CLIENT_GROUPS_CACHE`) on bot startup during `post_init()`.
+  - **Category A (Trusted Groups)**: Orders are forwarded directly to Loader Group (status `Pending`).
+  - **Category B (Payment Required Groups)**: Orders are forwarded to private Payment Review Group (status `Pending Payment`).
+  - **Payment Review Commands**:
+    - `/paymentgroup`: Configures private Payment Review Group.
+    - `/approve <order_id>`: Approves Category B order, updates status to `Approved`, and forwards original message to Loader Group.
+    - `/reject <order_id>`: Rejects Category B order, updates status to `Rejected`.
+  - **Category Commands**:
+    - `/A`: Assigns group to Category A (`✅ This group has been assigned to Category A.`).
+    - `/B`: Assigns group to Category B (`✅ This group has been assigned to Category B.`).
+    - `/category`: Displays current category (`Current Category ... Group: ... Category: ...`).
+    - `/removecategory`: Removes group category (`✅ Group category removed successfully.`).
+  - Added structured logs: `[CATEGORY] Group assigned to Category A/B`, `[PAYMENT] Order #<id> routed to Payment Review Group`, `[PAYMENT] Order #<id> approved/rejected`.
+
 ## [1.14.0] - 2026-08-09
 
 ### Changed
 - **Removed Non-Reply & Unmatched Reply Warning Messages in Loader Group**:
-  - Removed chat error messages (`❌ Please reply to the original order message.`) when staff send non-reply messages or chat in the Loader Group.
-  - Replaced with silent logging: `[LOADER] Ignored non-reply message.`
-  - Removed chat error messages when a reply does not match any active order in DB.
-  - Replaced with silent logging: `[LOADER] Ignored reply that does not match any active order.`
-  - Valid order replies continue to collect images, process `wrong` status, deliver images to customer, update database, and set reactions.
+  - Replaced error cards with silent logging: `[LOADER] Ignored non-reply message.` and `[LOADER] Ignored reply that does not match any active order.`
 
 ## [1.13.0] - 2026-08-09
 
 ### Added & Changed
 - **Ignore Super Admin & Delivery User Messages in Client Group**:
-  - Super Admin (`1573531032`) and Delivery User (`1078400998`, `1858358195`) messages in Client Group are ignored completely without keyword detection, order creation, or database saves.
-  - Logs: `[CLIENT] Ignored Super Admin message. User ID: 1573531032` and `[CLIENT] Ignored Delivery User message. User ID: <user_id>`.
+  - Messages from Super Admins and Delivery Users in Client Group are ignored completely without order processing.
 
 ## [1.12.0] - 2026-08-09
 
 ### Added & Changed
 - **Role-Based User Management (`authorized_users`)**:
-  - Implemented `AuthorizedUser` model and `authorized_users` database table.
-  - Super Admin commands: `/user delivery add <user_id>`, `/user delivery remove <user_id>`, `/users`.
+  - Implemented `AuthorizedUser` model and user management commands (`/user`, `/users`).
 
 ## [1.11.0] - 2026-08-09
 
