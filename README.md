@@ -1,11 +1,11 @@
-# Telegram Email Image Delivery Bot (v1.2.0) 🚀
+# Telegram Email Image Delivery Bot (v1.3.0) 🚀
 
 [![Python CI](https://github.com/pubgn960/telegram-email-delivery-bot/actions/workflows/python.yml/badge.svg)](https://github.com/pubgn960/telegram-email-delivery-bot/actions/workflows/python.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Railway Deploy](https://railway.app/button.svg)](https://railway.app/)
 
-A self-configuring, production-ready Telegram bot built with **Python 3.12** and **python-telegram-bot v22+**. Operates on a production **Two-Group Reply-Based Workflow** linking customer orders from the **Client Group** directly to loader image submissions in the **Loader Group**.
+A self-configuring, privacy-protected production Telegram bot built with **Python 3.12** and **python-telegram-bot v22+**. Operates on a production **Two-Group Reply-Based Workflow** with **Telegram Reactions** (`📥` order received, `❤️` delivery completed) and **Complete Privacy Protection** (zero customer names/usernames exposed).
 
 ---
 
@@ -19,22 +19,34 @@ A self-configuring, production-ready Telegram bot built with **Python 3.12** and
             |                                      |
      Customer sends order                    Bot forwards order
  (Email: abc@gmail.com)                      (Order ID: #10025)
-            |                                      |
-            v                                      v
-+-----------+-----------+              +-----------+-----------+
-| Bot Registers Order   |------------->| Loader Replies to Order   |
-| (Status: Pending)     |              | (Photos / Albums / Docs)  |
-+-----------------------+              +-----------+-----------+
-            ^                                      |
+  Bot adds 📥 reaction                             |
             |                                      v
-   Bot delivers albums                 Bot validates reply &
-   to Client Group                     buffers image file_ids
+            v                          +-----------+-----------+
++-----------+-----------+              | Loader Replies to Order   |
+| Bot Registers Order   |------------->| (Photos / Albums / Docs)  |
+| (Status: Pending)     |              +-----------+-----------+
++-----------------------+                          |
+            ^                                      v
+            |                          Bot adds ❤️ reaction to
+   Bot delivers albums                 Loader delivery message
+   to Client Group                                 |
+  Bot adds ❤️ reaction                             |
+  to customer message                              |
             |                                      |
             +--------------------------------------+
                                |
                   Updates Status to 'Delivered'
                   Edits Loader Msg in Loader Group
 ```
+
+---
+
+## 🔒 Privacy & Telegram Reaction Features
+
+1. **Complete Customer Privacy**: Customer usernames, first names, last names, and Telegram User IDs are **NEVER** displayed or forwarded anywhere.
+2. **Order Received Reaction (`📥` / `✅`)**: Placed on the original customer message in the Client Group as soon as the order is registered and forwarded.
+3. **Delivery Completed Reaction (`❤️`)**: Placed on both the original customer order message in the Client Group and the Loader's delivery message in the Loader Group upon successful delivery.
+4. **Graceful Fallbacks**: If reactions are disabled or unsupported in a group, the bot logs `Reaction not supported` and continues operating smoothly without crashing.
 
 ---
 
@@ -46,48 +58,56 @@ A customer posts an order message in **Group 1 (Client Group)** containing text 
 10800 CP
 Email: abc@gmail.com
 ```
-The bot creates a database record with `Order ID: #10025`, status `Pending`, and automatically posts/forwards the formatted order message into **Group 2 (Loader Group)**:
+The bot creates an order record (`Order ID: #1`), adds an `📥` reaction to the customer's message, and forwards the clean order format to **Group 2 (Loader Group)**:
 ```text
 📦 NEW ORDER
-Order ID: #10025
-Package: 10800 CP
-Email: abc@gmail.com
-Customer: @john_doe
-Time: 2026-08-08 17:30
+
+Order ID:
+#1
+
+Package:
+10800 CP
+
+Email:
+abc@gmail.com
+
+Time:
+2026-08-08 12:42 UTC
 ```
 
 ### Step 2: Loader Reply (Loader Group)
 The loader **MUST reply directly** to the bot's Order Message in the Loader Group with photos, photo-documents, or albums.
 
-- The loader **never types the email manually**.
-- The loader **never searches by email**.
-- If the loader sends images without replying, the bot rejects the upload:
+- Loaders **never type emails manually** or search by email.
+- If a loader sends images without replying, the bot rejects the upload:
   ```text
   ❌ Please reply to the original order message.
   ```
 
 ### Step 3: Automated Delivery & Confirmations
-Upon album completion, the bot automatically dispatches the image albums (split into max 10-item Telegram albums) to the **Client Group**:
+Upon album completion, the bot automatically dispatches the image albums to the **Client Group**:
 ```text
-📧 Email: abc@gmail.com
-📦 Order ID: #10025
+📧 Email
+abc@gmail.com
+
+📦 Order ID
+#1
+
 ✅ Delivery Completed
 ```
-The bot updates the order status to `Delivered` and sends a confirmation back to the Loader Group:
+The bot adds a `❤️` reaction to both the customer order message in the Client Group and the Loader delivery message in the Loader Group, then sends a confirmation to the Loader Group:
 ```text
 ✅ DELIVERED
-Order ID: #10025
-Images: 8
-Delivered: 2026-08-08 17:45
+
+Order ID:
+#1
+
+Images:
+8
+
+Delivered:
+2026-08-08 17:45
 ```
-
----
-
-## 🛡 Duplicate & Timeout Safeguards
-
-- **Duplicate Delivery Prevention**: If a loader replies to an already delivered order, the bot replies: `⚠️ This order has already been delivered.`
-- **Fingerprint Protection**: Rejects duplicate media group uploads via SHA256 fingerprints.
-- **Order Timeout Check**: Pending orders older than 24 hours are automatically marked `Expired` (⏰ Pending Too Long).
 
 ---
 
@@ -120,14 +140,3 @@ Only **3 environment variables** are required:
 - `/backup` - Download SQLite database backup file.
 - `/restore` - Restore SQLite database from attached `.db` file.
 - `/resetgroups` - Clear group configurations in DB.
-
----
-
-## 🚂 Railway Deployment Guide
-
-1. Push your repository to GitHub.
-2. Create a **New Project** on [Railway](https://railway.app/) → **Deploy from GitHub repo**.
-3. Click **+ New** → **Database** → **PostgreSQL** (Railway auto-populates `DATABASE_URL`).
-4. Set Environment Variables: `BOT_TOKEN`, `ADMIN_IDS`.
-5. Railway automatically builds and launches the worker via `python main.py`.
-6. Send `/source` in your Client Group and `/delivery` in your Loader Group!

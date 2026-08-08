@@ -1,5 +1,5 @@
 """
-Utility functions for security, permission checking, system metrics, logging setup, and formatting.
+Utility functions for security, permission checking, reaction handling, system metrics, logging setup, and formatting.
 """
 
 import os
@@ -7,7 +7,7 @@ import sys
 import time
 import logging
 from typing import Optional
-from telegram import Update
+from telegram import Update, Bot, ReactionTypeEmoji
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,71 @@ async def check_admin_permission(update: Update) -> bool:
     return False
 
 
+async def safe_set_message_reaction(
+    bot: Bot,
+    chat_id: Optional[int],
+    message_id: Optional[int],
+    emoji: str = "📥",
+    fallback_emoji: Optional[str] = "✅"
+) -> bool:
+    """
+    Safely sets a Telegram reaction emoji on a message.
+    Gracefully falls back if primary reaction fails or if reactions are unsupported/disabled in chat.
+    Never crashes. Logs 'Reaction not supported' on failure.
+    """
+    if not chat_id or not message_id:
+        return False
+
+    # Primary emoji attempt
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)]
+        )
+        logger.info(f"Reaction Added | Emoji '{emoji}' on Msg ID {message_id} in Chat {chat_id}")
+        return True
+    except Exception as e:
+        logger.debug(f"Reaction '{emoji}' via ReactionTypeEmoji failed: {e}. Trying string list...")
+
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=[emoji]
+        )
+        logger.info(f"Reaction Added | Emoji '{emoji}' on Msg ID {message_id} in Chat {chat_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Reaction not supported for emoji '{emoji}': {e}")
+
+    # Fallback emoji attempt
+    if fallback_emoji:
+        try:
+            await bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=[ReactionTypeEmoji(emoji=fallback_emoji)]
+            )
+            logger.info(f"Reaction Added (Fallback) | Emoji '{fallback_emoji}' on Msg ID {message_id} in Chat {chat_id}")
+            return True
+        except Exception:
+            pass
+
+        try:
+            await bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=[fallback_emoji]
+            )
+            logger.info(f"Reaction Added (Fallback) | Emoji '{fallback_emoji}' on Msg ID {message_id} in Chat {chat_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Reaction not supported for fallback '{fallback_emoji}': {e}")
+
+    return False
+
+
 def get_uptime_str() -> str:
     """Calculates and formats bot uptime into readable string (e.g. 2d 5h 12m 30s)."""
     elapsed = int(time.time() - BOT_START_TIME)
@@ -107,7 +172,7 @@ def get_memory_usage_mb() -> str:
     try:
         import resource
         mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # On Linux ru_maxrss is in KB; on macOS in bytes
+
         if sys.platform == "darwin":
             return f"{mem_kb / (1024 * 1024):.2f} MB"
         return f"{mem_kb / 1024:.2f} MB"

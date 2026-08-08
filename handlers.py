@@ -1,7 +1,7 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
-Implements the Two-Group Reply-Based Workflow (Client Group & Loader Group), Order Forwarding,
-Loader Reply Validation, Duplicate Delivery Protection, Order Management Commands, and System Stats.
+Implements Two-Group Reply-Based Workflow, Privacy Protection (No Customer Names exposed),
+Telegram Reaction handling (📥 order received, ❤️ delivery completed), and Admin Commands.
 """
 
 import io
@@ -44,6 +44,7 @@ from database import (
 from utils import (
     check_admin_permission,
     is_admin,
+    safe_set_message_reaction,
     get_uptime_str,
     get_memory_usage_mb,
     is_railway_environment,
@@ -62,12 +63,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Monitors messages in Group 1 (Client Group).
     When a customer sends an order message containing an email:
     1. Registers new Order in DB with status 'Pending'.
-    2. Formats and forwards Order Notification message to Group 2 (Loader Group).
-    3. Saves loader_message_id in DB to associate future replies.
+    2. Formats and forwards Order Notification message to Group 2 (Loader Group) - Privacy Protected (No Customer Names).
+    3. Adds 📥 (or ✅) reaction to original customer order message.
     """
     message = update.effective_message
     chat = update.effective_chat
-    user = update.effective_user
 
     if not message or not chat:
         return
@@ -87,10 +87,10 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not email:
         return
 
-    # Extract package description and customer name
+    logger.info(f"Order Received | Email detected: '{email}' in Client Group {chat.id}")
+
+    # Extract package description (NO customer name / username / user_id!)
     package_desc = extract_package(text_content)
-    customer_name = f"@{user.username}" if (user and user.username) else (user.first_name if user else "Customer")
-    customer_escaped = html.escape(customer_name)
     email_escaped = html.escape(email)
     pkg_escaped = html.escape(package_desc)
 
@@ -104,19 +104,16 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     created_time_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
 
-    # 2. Format Order Notification for Loader Group
+    # 2. Format Order Notification for Loader Group (Clean Privacy Format)
     loader_order_text = (
         f"📦 <b>NEW ORDER</b>\n\n"
-        f"<b>Order ID:</b> #{order.id}\n"
-        f"<b>Package:</b> {pkg_escaped}\n"
-        f"<b>Email:</b> {email_escaped}\n"
-        f"<b>Customer:</b> {customer_escaped}\n"
-        f"<b>Time:</b> {created_time_str}"
+        f"<b>Order ID:</b>\n#{order.id}\n\n"
+        f"<b>Package:</b>\n{pkg_escaped}\n\n"
+        f"<b>Email:</b>\n{email_escaped}\n\n"
+        f"<b>Time:</b>\n{created_time_str}"
     )
 
-    logger.info(f"New Order | Order ID: #{order.id} | Email: {email} | Package: '{package_desc}'")
-
-    # 3. Post / Forward Order Notification to Loader Group
+    # 3. Post Order Notification to Loader Group
     loader_group_id = settings.delivery_group_id
     if loader_group_id:
         try:
@@ -126,9 +123,20 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="HTML"
             )
             await set_order_loader_message_id(order.id, forwarded_msg.message_id)
-            logger.info(f"Forwarded Order | Order ID: #{order.id} -> Loader Group ({loader_group_id})")
+            logger.info(f"Order Forwarded | Order ID: #{order.id} -> Loader Group ({loader_group_id})")
         except Exception as e:
             logger.error(f"Failed to post Order #{order.id} to Loader Group: {e}")
+
+    # 4. Add 📥 (fallback ✅) reaction to ORIGINAL customer order message
+    reacted = await safe_set_message_reaction(
+        bot=context.bot,
+        chat_id=chat.id,
+        message_id=message.message_id,
+        emoji="📥",
+        fallback_emoji="✅"
+    )
+    if reacted:
+        logger.info(f"Reaction Added | 📥 reaction placed on original customer Order #{order.id}")
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -206,7 +214,7 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    logger.info(f"Loader Reply | Order ID: #{order.id} | Email: {order.email}")
+    logger.info(f"Loader Delivery Received | Order ID: #{order.id} | Email: {order.email}")
 
     # Pass media to collector
     await media_collector.add_reply_media_message(
@@ -374,7 +382,7 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ==========================================
-# New & Enhanced Order Management Commands
+# Order Management Commands
 # ==========================================
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -430,7 +438,6 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     raw_arg = context.args[0].strip()
 
-    # If numeric, search by Order ID
     if raw_arg.lstrip("#").isdigit():
         order_id = int(raw_arg.lstrip("#"))
         order = await get_order_by_id(order_id)

@@ -1,7 +1,7 @@
 """
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
 dispatching image albums to the Client Group, Telegram API retries, database status updates,
-and Loader confirmations.
+Loader confirmations, and Telegram reactions.
 """
 
 import html
@@ -21,6 +21,7 @@ from database import (
     delete_orders_by_email
 )
 from models import Order, Image
+from utils import safe_set_message_reaction
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,8 @@ async def deliver_order_by_id(
     target_delivery_chat_id: Optional[int] = None
 ) -> bool:
     """
-    Delivers stored image albums for an order to the Client Group and sends confirmation to the Loader Group.
+    Delivers stored image albums for an order to the Client Group, sends clean delivery header,
+    adds ❤️ reactions to original customer message and loader delivery message, and notifies Loader Group.
 
     Args:
         bot (Bot): Telegram Bot instance.
@@ -194,10 +196,10 @@ async def deliver_order_by_id(
         if sent:
             delivered_count += len(batch)
 
-    # 2. Send Delivery Completion Header in Client Group
+    # 2. Send Clean Delivery Completion Header in Client Group (No Customer Name!)
     completion_text = (
-        f"📧 <b>Email:</b>\n{email_escaped}\n\n"
-        f"📦 <b>Order ID:</b>\n#{order.id}\n\n"
+        f"📧 <b>Email</b>\n{email_escaped}\n\n"
+        f"📦 <b>Order ID</b>\n#{order.id}\n\n"
         f"✅ <b>Delivery Completed</b>"
     )
 
@@ -213,10 +215,34 @@ async def deliver_order_by_id(
     # 3. Mark order status as Delivered in DB
     updated_order = await mark_order_delivered(order.id)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    logger.info(f"Delivery Completed | Order ID: #{order.id} delivered.")
 
-    # 4. Edit or reply to Loader Order Message in Loader Group
+    # 4. Reaction On Customer Order (Add ❤️ reaction to original customer order message in Client Group)
+    if order.original_message_id and client_chat_id:
+        cust_reacted = await safe_set_message_reaction(
+            bot=bot,
+            chat_id=client_chat_id,
+            message_id=order.original_message_id,
+            emoji="❤️",
+            fallback_emoji="✅"
+        )
+        if cust_reacted:
+            logger.info(f"Customer Reaction Added | ❤️ reaction placed on original customer Order #{order.id}")
+
+    # 5. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
     target_loader_msg_id = loader_reply_msg_id or order.loader_message_id
     if loader_group_id and target_loader_msg_id:
+        loader_reacted = await safe_set_message_reaction(
+            bot=bot,
+            chat_id=loader_group_id,
+            message_id=target_loader_msg_id,
+            emoji="❤️",
+            fallback_emoji="✅"
+        )
+        if loader_reacted:
+            logger.info(f"Loader Reaction Added | ❤️ reaction placed on Loader delivery message for Order #{order.id}")
+
+        # Send confirmation message to Loader Group
         loader_notice = (
             f"✅ <b>DELIVERED</b>\n\n"
             f"<b>Order ID:</b>\n#{order.id}\n\n"
@@ -233,7 +259,7 @@ async def deliver_order_by_id(
         except Exception as e:
             logger.error(f"Failed to send loader delivery confirmation: {e}")
 
-    # 5. Optional post-delivery cleanup
+    # 6. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:
         logger.info(f"DELETE_AFTER_DELIVERY enabled. Purging order #{order.id} for email: '{order.email}'")
         await delete_orders_by_email(order.email)
