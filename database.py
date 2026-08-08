@@ -1,5 +1,5 @@
 """
-Database manager providing asynchronous SQLAlchemy session management, CRUD operations,
+Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 SHA256 fingerprint deduplication, CSV export, backup/restore, and dynamic Settings management.
 """
 
@@ -72,7 +72,7 @@ async def init_db() -> None:
 async def get_or_create_settings() -> Settings:
     """
     Retrieves or initializes the single Settings record (id=1).
-    All group IDs default to None until configured from Telegram via /source or /delivery.
+    Avoids nested session.begin() calls to prevent transaction conflicts.
     """
     async with AsyncSessionLocal() as session:
         stmt = select(Settings).where(Settings.id == 1)
@@ -80,20 +80,17 @@ async def get_or_create_settings() -> Settings:
         settings = res.scalar_one_or_none()
 
         if not settings:
-            async with session.begin():
-                settings = Settings(
-                    id=1,
-                    source_group_id=None,
-                    source_group_title=None,
-                    delivery_group_id=None,
-                    delivery_group_title=None,
-                    updated_at=datetime.now(timezone.utc)
-                )
-                session.add(settings)
-            
-            # Reload initialized settings
-            res = await session.execute(stmt)
-            settings = res.scalar_one()
+            settings = Settings(
+                id=1,
+                source_group_id=None,
+                source_group_title=None,
+                delivery_group_id=None,
+                delivery_group_title=None,
+                updated_at=datetime.now(timezone.utc)
+            )
+            session.add(settings)
+            await session.commit()
+            await session.refresh(settings)
             logger.info("Initialized default Settings record in database.")
 
         return settings
@@ -107,98 +104,108 @@ async def get_current_settings() -> Settings:
 async def update_source_group(chat_id: int, title: str) -> Settings:
     """Updates the Source Group configuration in database."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Settings)
-                .where(Settings.id == 1)
-                .values(
-                    source_group_id=chat_id,
-                    source_group_title=title,
-                    updated_at=datetime.now(timezone.utc)
-                )
+        stmt = (
+            update(Settings)
+            .where(Settings.id == 1)
+            .values(
+                source_group_id=chat_id,
+                source_group_title=title,
+                updated_at=datetime.now(timezone.utc)
             )
-            await session.execute(stmt)
-        logger.info(f"Source Group updated in DB: ID={chat_id}, Title='{title}'")
+        )
+        await session.execute(stmt)
+        await session.commit()
 
-    return await get_or_create_settings()
+        res = await session.execute(select(Settings).where(Settings.id == 1))
+        settings = res.scalar_one()
+        logger.info(f"Source Group updated in DB: ID={chat_id}, Title='{title}'")
+        return settings
 
 
 async def update_delivery_group(chat_id: int, title: str) -> Settings:
     """Updates the Delivery Group configuration in database."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Settings)
-                .where(Settings.id == 1)
-                .values(
-                    delivery_group_id=chat_id,
-                    delivery_group_title=title,
-                    updated_at=datetime.now(timezone.utc)
-                )
+        stmt = (
+            update(Settings)
+            .where(Settings.id == 1)
+            .values(
+                delivery_group_id=chat_id,
+                delivery_group_title=title,
+                updated_at=datetime.now(timezone.utc)
             )
-            await session.execute(stmt)
-        logger.info(f"Delivery Group updated in DB: ID={chat_id}, Title='{title}'")
+        )
+        await session.execute(stmt)
+        await session.commit()
 
-    return await get_or_create_settings()
+        res = await session.execute(select(Settings).where(Settings.id == 1))
+        settings = res.scalar_one()
+        logger.info(f"Delivery Group updated in DB: ID={chat_id}, Title='{title}'")
+        return settings
 
 
 async def remove_source_group() -> Settings:
     """Removes Source Group configuration from database."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Settings)
-                .where(Settings.id == 1)
-                .values(
-                    source_group_id=None,
-                    source_group_title=None,
-                    updated_at=datetime.now(timezone.utc)
-                )
+        stmt = (
+            update(Settings)
+            .where(Settings.id == 1)
+            .values(
+                source_group_id=None,
+                source_group_title=None,
+                updated_at=datetime.now(timezone.utc)
             )
-            await session.execute(stmt)
-        logger.info("Source Group configuration removed from DB.")
+        )
+        await session.execute(stmt)
+        await session.commit()
 
-    return await get_or_create_settings()
+        res = await session.execute(select(Settings).where(Settings.id == 1))
+        settings = res.scalar_one()
+        logger.info("Source Group configuration removed from DB.")
+        return settings
 
 
 async def remove_delivery_group() -> Settings:
     """Removes Delivery Group configuration from database."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Settings)
-                .where(Settings.id == 1)
-                .values(
-                    delivery_group_id=None,
-                    delivery_group_title=None,
-                    updated_at=datetime.now(timezone.utc)
-                )
+        stmt = (
+            update(Settings)
+            .where(Settings.id == 1)
+            .values(
+                delivery_group_id=None,
+                delivery_group_title=None,
+                updated_at=datetime.now(timezone.utc)
             )
-            await session.execute(stmt)
-        logger.info("Delivery Group configuration removed from DB.")
+        )
+        await session.execute(stmt)
+        await session.commit()
 
-    return await get_or_create_settings()
+        res = await session.execute(select(Settings).where(Settings.id == 1))
+        settings = res.scalar_one()
+        logger.info("Delivery Group configuration removed from DB.")
+        return settings
 
 
 async def reset_groups() -> Settings:
     """Resets both Source and Delivery Group configurations in database."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Settings)
-                .where(Settings.id == 1)
-                .values(
-                    source_group_id=None,
-                    source_group_title=None,
-                    delivery_group_id=None,
-                    delivery_group_title=None,
-                    updated_at=datetime.now(timezone.utc)
-                )
+        stmt = (
+            update(Settings)
+            .where(Settings.id == 1)
+            .values(
+                source_group_id=None,
+                source_group_title=None,
+                delivery_group_id=None,
+                delivery_group_title=None,
+                updated_at=datetime.now(timezone.utc)
             )
-            await session.execute(stmt)
-        logger.info("All Group settings reset in DB.")
+        )
+        await session.execute(stmt)
+        await session.commit()
 
-    return await get_or_create_settings()
+        res = await session.execute(select(Settings).where(Settings.id == 1))
+        settings = res.scalar_one()
+        logger.info("All Group settings reset in DB.")
+        return settings
 
 
 # ==========================================
@@ -219,41 +226,42 @@ async def save_order(
     fingerprint = compute_fingerprint(email_clean, file_ids)
 
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            # Check 1: Fingerprint duplicate check
-            fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
-            fp_res = await session.execute(fp_stmt)
-            if fp_res.scalar_one_or_none():
-                logger.info(f"Duplicate upload detected via SHA256 fingerprint ({fingerprint[:10]}...). Skipped.")
+        # Check 1: Fingerprint duplicate check
+        fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
+        fp_res = await session.execute(fp_stmt)
+        if fp_res.scalar_one_or_none():
+            logger.info(f"Duplicate upload detected via SHA256 fingerprint ({fingerprint[:10]}...). Skipped.")
+            return None, True
+
+        # Check 2: Media group ID duplicate check
+        if media_group_id:
+            mg_stmt = select(Order).where(Order.media_group_id == media_group_id)
+            mg_res = await session.execute(mg_stmt)
+            if mg_res.scalar_one_or_none():
+                logger.info(f"Duplicate upload detected via media_group_id ({media_group_id}). Skipped.")
                 return None, True
 
-            # Check 2: Media group ID duplicate check
-            if media_group_id:
-                mg_stmt = select(Order).where(Order.media_group_id == media_group_id)
-                mg_res = await session.execute(mg_stmt)
-                if mg_res.scalar_one_or_none():
-                    logger.info(f"Duplicate upload detected via media_group_id ({media_group_id}). Skipped.")
-                    return None, True
+        # Create new order
+        new_order = Order(
+            email=email_clean,
+            media_group_id=media_group_id,
+            fingerprint=fingerprint,
+            created_at=datetime.now(timezone.utc)
+        )
+        session.add(new_order)
+        await session.flush()
 
-            # Create new order
-            new_order = Order(
-                email=email_clean,
-                media_group_id=media_group_id,
-                fingerprint=fingerprint,
-                created_at=datetime.now(timezone.utc)
+        # Add Image records
+        for idx, (file_id, file_type) in enumerate(file_items):
+            img = Image(
+                order_id=new_order.id,
+                telegram_file_id=file_id,
+                file_type=file_type,
+                position=idx
             )
-            session.add(new_order)
-            await session.flush()
+            session.add(img)
 
-            # Add Image records
-            for idx, (file_id, file_type) in enumerate(file_items):
-                img = Image(
-                    order_id=new_order.id,
-                    telegram_file_id=file_id,
-                    file_type=file_type,
-                    position=idx
-                )
-                session.add(img)
+        await session.commit()
 
         # Reload with images eagerly loaded
         res = await session.execute(
@@ -297,14 +305,14 @@ async def get_all_orders_by_email(email: str) -> List[Order]:
 async def mark_order_delivered(order_id: int) -> None:
     """Updates delivered_at timestamp for an order."""
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = (
-                update(Order)
-                .where(Order.id == order_id)
-                .values(delivered_at=datetime.now(timezone.utc))
-            )
-            await session.execute(stmt)
-            logger.info(f"Order {order_id} marked as delivered.")
+        stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(delivered_at=datetime.now(timezone.utc))
+        )
+        await session.execute(stmt)
+        await session.commit()
+        logger.info(f"Order {order_id} marked as delivered.")
 
 
 async def get_pending_orders() -> List[Order]:
@@ -324,19 +332,19 @@ async def delete_orders_by_email(email: str) -> int:
     """Deletes all orders matching email."""
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = select(Order.id).where(Order.email == email_clean)
-            res = await session.execute(stmt)
-            ids = list(res.scalars().all())
+        stmt = select(Order.id).where(Order.email == email_clean)
+        res = await session.execute(stmt)
+        ids = list(res.scalars().all())
 
-            if not ids:
-                return 0
+        if not ids:
+            return 0
 
-            del_stmt = delete(Order).where(Order.id.in_(ids))
-            result = await session.execute(del_stmt)
-            count = result.rowcount
-            logger.info(f"Deleted {count} order(s) for email: {email_clean}")
-            return count
+        del_stmt = delete(Order).where(Order.id.in_(ids))
+        result = await session.execute(del_stmt)
+        await session.commit()
+        count = result.rowcount
+        logger.info(f"Deleted {count} order(s) for email: {email_clean}")
+        return count
 
 
 async def get_stats() -> Dict[str, Any]:
@@ -363,13 +371,13 @@ async def cleanup_old_records(days: int) -> int:
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = delete(Order).where(Order.created_at < cutoff)
-            res = await session.execute(stmt)
-            count = res.rowcount
-            if count > 0:
-                logger.info(f"Storage Retention: Purged {count} order(s) older than {days} days.")
-            return count
+        stmt = delete(Order).where(Order.created_at < cutoff)
+        res = await session.execute(stmt)
+        await session.commit()
+        count = res.rowcount
+        if count > 0:
+            logger.info(f"Storage Retention: Purged {count} order(s) older than {days} days.")
+        return count
 
 
 async def export_orders_to_csv() -> str:
