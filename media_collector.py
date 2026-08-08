@@ -1,12 +1,13 @@
 """
 Media Group Collector module supporting debouncing, user session fallback (5-min window),
-photo documents, and SHA256 fingerprint duplicate suppression.
+photo documents, and SHA256 fingerprint duplicate suppression. Includes thread-safe locking and LRU cache.
 """
 
 import time
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Any, Set
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple, Any
 from telegram import Message, PhotoSize, Document
 
 from config import Config
@@ -31,6 +32,7 @@ class UserSessionManager:
     def update_session(self, user_id: int, email: str) -> None:
         """Stores or updates the active email session for a Telegram user."""
         if user_id and email:
+            self._cleanup_expired()
             self._sessions[user_id] = (email.lower().strip(), time.time())
             logger.debug(f"User {user_id} session updated with email: {email}")
 
@@ -44,9 +46,15 @@ class UserSessionManager:
             logger.debug(f"Active session found for user {user_id}: {email}")
             return email
         else:
-            # Session expired
-            del self._sessions[user_id]
+            self._sessions.pop(user_id, None)
             return None
+
+    def _cleanup_expired(self) -> None:
+        """Removes expired user sessions from memory."""
+        now = time.time()
+        expired = [uid for uid, (_, ts) in self._sessions.items() if now - ts > self.timeout]
+        for uid in expired:
+            self._sessions.pop(uid, None)
 
 
 # Global session manager instance
@@ -56,17 +64,20 @@ user_session_manager = UserSessionManager()
 class MediaGroupCollector:
     """
     In-memory debouncer and collector for Telegram photo albums and single photo/document messages.
+    Uses asyncio.Lock for thread-safe concurrent update processing.
     """
 
     def __init__(self, timeout: float = Config.MEDIA_GROUP_TIMEOUT):
         self.timeout = timeout
         # Structure: media_group_id -> { "items": [(msg_id, file_id, file_type, caption, user_id)], "task": Task }
         self._buffers: Dict[str, Dict[str, Any]] = {}
-        self._processed_cache: Set[str] = set()
+        # LRU cache for processed media group IDs (max 1000 items)
+        self._processed_cache: OrderedDict = OrderedDict()
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     async def add_media_message(self, message: Message) -> None:
         """
-        Processes an incoming photo or photo-document message.
+        Processes an incoming photo or photo-document message safely.
 
         Args:
             message (Message): Telegram message object.
@@ -76,7 +87,6 @@ class MediaGroupCollector:
 
         # 1. Extract Photo or Photo-Document file_id
         if message.photo:
-            # Highest resolution photo
             file_id = message.photo[-1].file_id
             file_type = "photo"
         elif message.document:
@@ -116,29 +126,29 @@ class MediaGroupCollector:
                 logger.debug("Single photo received without explicit email or active user session. Ignored.")
             return
 
-        # Case B: Media Group (Album)
-        if media_group_id in self._processed_cache:
-            logger.info(f"Duplicate Media Group '{media_group_id}' skipped via in-memory cache.")
-            return
+        # Case B: Media Group (Album) - Thread safe locking
+        async with self._lock:
+            if media_group_id in self._processed_cache:
+                logger.info(f"Duplicate Media Group '{media_group_id}' skipped via LRU cache.")
+                return
 
-        # Buffer item
-        if media_group_id in self._buffers:
-            buf = self._buffers[media_group_id]
-            if buf.get("task") and not buf["task"].done():
-                buf["task"].cancel()
-            buf["items"].append((msg_id, file_id, file_type, caption, user_id))
-            if email and not buf.get("email"):
-                buf["email"] = email
-        else:
-            self._buffers[media_group_id] = {
-                "items": [(msg_id, file_id, file_type, caption, user_id)],
-                "email": email,
-                "task": None
-            }
+            if media_group_id in self._buffers:
+                buf = self._buffers[media_group_id]
+                if buf.get("task") and not buf["task"].done():
+                    buf["task"].cancel()
+                buf["items"].append((msg_id, file_id, file_type, caption, user_id))
+                if email and not buf.get("email"):
+                    buf["email"] = email
+            else:
+                self._buffers[media_group_id] = {
+                    "items": [(msg_id, file_id, file_type, caption, user_id)],
+                    "email": email,
+                    "task": None
+                }
 
-        # Schedule debounced flush task
-        task = asyncio.create_task(self._schedule_flush(media_group_id))
-        self._buffers[media_group_id]["task"] = task
+            # Schedule debounced flush task
+            task = asyncio.create_task(self._schedule_flush(media_group_id))
+            self._buffers[media_group_id]["task"] = task
 
     async def _schedule_flush(self, media_group_id: str) -> None:
         """Waits for debounce timeout before flushing media group to database."""
@@ -149,8 +159,10 @@ class MediaGroupCollector:
             pass
 
     async def _flush_media_group(self, media_group_id: str) -> None:
-        """Flushes buffered album, resolves email, checks fingerprint, and saves to database."""
-        buf = self._buffers.pop(media_group_id, None)
+        """Flushes buffered album safely under lock, resolves email, and saves to database."""
+        async with self._lock:
+            buf = self._buffers.pop(media_group_id, None)
+
         if not buf or not buf.get("items"):
             return
 
@@ -177,9 +189,10 @@ class MediaGroupCollector:
             if is_dup:
                 logger.info(f"Duplicate Media Group '{media_group_id}' skipped.")
 
-            self._processed_cache.add(media_group_id)
-            if len(self._processed_cache) > 1000:
-                self._processed_cache.pop()
+            async with self._lock:
+                self._processed_cache[media_group_id] = True
+                if len(self._processed_cache) > 1000:
+                    self._processed_cache.popitem(last=False)  # Evict oldest entry (LRU)
         else:
             logger.warning(f"Media Group '{media_group_id}' ({len(items)} items) could not be saved: No email detected.")
 

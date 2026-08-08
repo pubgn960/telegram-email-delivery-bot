@@ -46,7 +46,9 @@ class Order(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Order(id={self.id}, email='{self.email}', fingerprint='{self.fingerprint}', images={len(self.images)})>"
+        # Safe repr avoiding lazy load execution in async contexts
+        img_count = len(self.__dict__['images']) if 'images' in self.__dict__ else "unloaded"
+        return f"<Order(id={self.id}, email='{self.email}', fingerprint='{self.fingerprint}', images={img_count})>"
 
 
 class Image(Base):

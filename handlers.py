@@ -1,10 +1,11 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
-Implements Source Group monitoring, Delivery Group triggering, and complete Admin management suite.
+Implements Source Group monitoring, Delivery Group triggering, and complete Admin management suite using HTML formatting.
 """
 
 import io
 import os
+import html
 import shutil
 import logging
 from telegram import Update
@@ -21,6 +22,7 @@ from database import (
     get_pending_orders,
     export_orders_to_csv,
     get_db_file_path,
+    dispose_engine,
     init_db
 )
 from utils import check_admin_permission
@@ -92,21 +94,21 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ==========================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command."""
+    """Handles the /start command using HTML formatting."""
     if not await check_admin_permission(update):
         return
 
     user = update.effective_user
-    name = user.first_name if user else "Admin"
+    name = html.escape(user.first_name if user else "Admin")
 
     welcome_msg = (
-        f"🤖 **Telegram Email Image Delivery Bot v1.0.0**\n\n"
+        f"🤖 <b>Telegram Email Image Delivery Bot v1.0.0</b>\n\n"
         f"Welcome {name}! You are authenticated as a bot administrator.\n\n"
-        f"📥 **Source Group ID**: `{Config.SOURCE_GROUP_ID or 'Unconfigured'}`\n"
-        f"📤 **Delivery Group ID**: `{Config.DELIVERY_GROUP_ID or 'Unconfigured'}`\n\n"
-        f"Type `/help` to see all available management commands."
+        f"📥 <b>Source Group ID</b>: <code>{Config.SOURCE_GROUP_ID or 'Unconfigured'}</code>\n"
+        f"📤 <b>Delivery Group ID</b>: <code>{Config.DELIVERY_GROUP_ID or 'Unconfigured'}</code>\n\n"
+        f"Type <code>/help</code> to see all available management commands."
     )
-    await update.effective_message.reply_text(welcome_msg, parse_mode="Markdown")
+    await update.effective_message.reply_text(welcome_msg, parse_mode="HTML")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -115,19 +117,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     help_msg = (
-        "🛠 **Admin Commands & Tools**\n\n"
-        "• `/start` - Check bot status\n"
-        "• `/help` - Show command instructions\n"
-        "• `/find <email>` - Search order history for email\n"
-        "• `/resend <email>` - Deliver stored images for email\n"
-        "• `/delete <email>` - Delete all database records for email\n"
-        "• `/stats` - Display storage & database metrics dashboard\n"
-        "• `/pending` - List all undelivered orders\n"
-        "• `/export` - Export database records as CSV file\n"
-        "• `/backup` - Download SQLite database backup\n"
-        "• `/restore` - Restore SQLite database from attached `.db` file\n"
+        "🛠 <b>Admin Commands & Tools</b>\n\n"
+        "• <code>/start</code> - Check bot status\n"
+        "• <code>/help</code> - Show command instructions\n"
+        "• <code>/find &lt;email&gt;</code> - Search order history for email\n"
+        "• <code>/resend &lt;email&gt;</code> - Deliver stored images for email\n"
+        "• <code>/delete &lt;email&gt;</code> - Delete all database records for email\n"
+        "• <code>/stats</code> - Display storage & database metrics dashboard\n"
+        "• <code>/pending</code> - List all undelivered orders\n"
+        "• <code>/export</code> - Export database records as CSV file\n"
+        "• <code>/backup</code> - Download SQLite database backup\n"
+        "• <code>/restore</code> - Restore SQLite database from attached <code>.db</code> file\n"
     )
-    await update.effective_message.reply_text(help_msg, parse_mode="Markdown")
+    await update.effective_message.reply_text(help_msg, parse_mode="HTML")
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -136,7 +138,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: `/find email@example.com`", parse_mode="Markdown")
+        await update.effective_message.reply_text("⚠️ Usage: <code>/find email@example.com</code>", parse_mode="HTML")
         return
 
     raw_input = " ".join(context.args)
@@ -148,19 +150,20 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     orders = await get_all_orders_by_email(email)
     if not orders:
-        await update.effective_message.reply_text(f"❌ No records found for email: `{email}`", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"❌ No records found for email: <code>{html.escape(email)}</code>", parse_mode="HTML")
         return
 
     total_imgs = sum(len(o.images) for o in orders)
-    details = [f"🔍 **Found {len(orders)} order(s) for email**: `{email}`\nTotal Images: **{total_imgs}**\n"]
+    email_escaped = html.escape(email)
+    details = [f"🔍 <b>Found {len(orders)} order(s) for email</b>: <code>{email_escaped}</code>\nTotal Images: <b>{total_imgs}</b>\n"]
 
     for idx, order in enumerate(orders, 1):
         created_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
         delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M:%S UTC") if order.delivered_at else "Pending"
         img_count = len(order.images)
-        details.append(f"{idx}. Order `{order.id}` | Created: `{created_str}` | Status: `{delivered_str}` | Images: `{img_count}`")
+        details.append(f"{idx}. Order <code>{order.id}</code> | Created: <code>{created_str}</code> | Status: <code>{delivered_str}</code> | Images: <code>{img_count}</code>")
 
-    await update.effective_message.reply_text("\n".join(details), parse_mode="Markdown")
+    await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
 
 
 async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -169,7 +172,7 @@ async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: `/resend email@example.com`", parse_mode="Markdown")
+        await update.effective_message.reply_text("⚠️ Usage: <code>/resend email@example.com</code>", parse_mode="HTML")
         return
 
     raw_input = " ".join(context.args)
@@ -180,7 +183,7 @@ async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     target_chat_id = update.effective_chat.id
-    await update.effective_message.reply_text(f"⏳ Processing re-delivery for `{email}`...", parse_mode="Markdown")
+    await update.effective_message.reply_text(f"⏳ Processing re-delivery for <code>{html.escape(email)}</code>...", parse_mode="HTML")
 
     await deliver_images_for_email(
         bot=context.bot,
@@ -196,7 +199,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: `/delete email@example.com`", parse_mode="Markdown")
+        await update.effective_message.reply_text("⚠️ Usage: <code>/delete email@example.com</code>", parse_mode="HTML")
         return
 
     raw_input = " ".join(context.args)
@@ -207,10 +210,11 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     deleted_count = await delete_orders_by_email(email)
+    email_escaped = html.escape(email)
     if deleted_count > 0:
-        await update.effective_message.reply_text(f"✅ Successfully deleted **{deleted_count}** record(s) for `{email}`.", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"✅ Successfully deleted <b>{deleted_count}</b> record(s) for <code>{email_escaped}</code>.", parse_mode="HTML")
     else:
-        await update.effective_message.reply_text(f"❌ No records found for `{email}`.", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"❌ No records found for <code>{email_escaped}</code>.", parse_mode="HTML")
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -220,15 +224,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     stats = await get_stats()
     msg = (
-        "📊 **Bot System & Database Dashboard**\n\n"
-        f"📦 **Total Orders**: `{stats['total_orders']}`\n"
-        f"🖼 **Total Images**: `{stats['total_images']}`\n"
-        f"✉️ **Unique Emails**: `{stats['unique_emails']}`\n"
-        f"⏳ **Pending Deliveries**: `{stats['pending_orders']}`\n"
-        f"📅 **Oldest Record Date**: `{stats['oldest_order_date']}`\n\n"
-        f"⚙️ **Retention Limit**: `{Config.CLEANUP_DAYS} Days`"
+        "📊 <b>Bot System & Database Dashboard</b>\n\n"
+        f"📦 <b>Total Orders</b>: <code>{stats['total_orders']}</code>\n"
+        f"🖼 <b>Total Images</b>: <code>{stats['total_images']}</code>\n"
+        f"✉️ <b>Unique Emails</b>: <code>{stats['unique_emails']}</code>\n"
+        f"⏳ <b>Pending Deliveries</b>: <code>{stats['pending_orders']}</code>\n"
+        f"📅 <b>Oldest Record Date</b>: <code>{stats['oldest_order_date']}</code>\n\n"
+        f"⚙️ <b>Retention Limit</b>: <code>{Config.CLEANUP_DAYS} Days</code>"
     )
-    await update.effective_message.reply_text(msg, parse_mode="Markdown")
+    await update.effective_message.reply_text(msg, parse_mode="HTML")
 
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -241,15 +245,16 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text("✅ All orders have been delivered! No pending uploads.")
         return
 
-    details = [f"⏳ **Found {len(pending)} Undelivered Order(s)**:\n"]
-    for idx, order in enumerate(pending[:15], 1):  # Cap at 15 for readable formatting
+    details = [f"⏳ <b>Found {len(pending)} Undelivered Order(s)</b>:\n"]
+    for idx, order in enumerate(pending[:15], 1):
         created_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        details.append(f"{idx}. Email: `{order.email}` | Images: `{len(order.images)}` | Created: `{created_str}`")
+        email_escaped = html.escape(order.email)
+        details.append(f"{idx}. Email: <code>{email_escaped}</code> | Images: <code>{len(order.images)}</code> | Created: <code>{created_str}</code>")
 
     if len(pending) > 15:
         details.append(f"\n... and {len(pending) - 15} more pending order(s).")
 
-    await update.effective_message.reply_text("\n".join(details), parse_mode="Markdown")
+    await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -266,8 +271,8 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await update.effective_message.reply_document(
         document=document_file,
-        caption="📄 **Orders Database Export (CSV)**",
-        parse_mode="Markdown"
+        caption="📄 <b>Orders Database Export (CSV)</b>",
+        parse_mode="HTML"
     )
 
 
@@ -291,8 +296,8 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await update.effective_message.reply_document(
             document=db_file,
-            caption="💾 **SQLite Database Backup**",
-            parse_mode="Markdown"
+            caption="💾 <b>SQLite Database Backup</b>",
+            parse_mode="HTML"
         )
     except Exception as e:
         logger.error(f"Error creating database backup: {e}")
@@ -307,13 +312,14 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     message = update.effective_message
     if not message.reply_to_message or not message.reply_to_message.document:
         await update.effective_message.reply_text(
-            "⚠️ Usage: Reply to a message containing an attached `.db` backup file with `/restore`."
+            "⚠️ Usage: Reply to a message containing an attached <code>.db</code> backup file with <code>/restore</code>.",
+            parse_mode="HTML"
         )
         return
 
     doc = message.reply_to_message.document
     if not doc.file_name.endswith(".db"):
-        await update.effective_message.reply_text("❌ Attached file must be a `.db` database backup file.")
+        await update.effective_message.reply_text("❌ Attached file must be a <code>.db</code> database backup file.", parse_mode="HTML")
         return
 
     db_path = await get_db_file_path()
@@ -326,11 +332,12 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         telegram_file = await context.bot.get_file(doc.file_id)
         backup_dest = f"{db_path}.bak"
 
-        # Backup current file first
+        # Dispose active DB engine pool before file copy
+        await dispose_engine()
+
         if os.path.exists(db_path):
             shutil.copyfile(db_path, backup_dest)
 
-        # Download replacement DB
         await telegram_file.download_to_drive(custom_path=db_path)
         await init_db()
 

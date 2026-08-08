@@ -5,7 +5,7 @@ photo/document dispatching, API retries, and delivery status tracking.
 
 import asyncio
 import logging
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Any
 from telegram import Bot, InputMediaPhoto, InputMediaDocument
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
@@ -51,6 +51,9 @@ async def send_media_group_with_retry(
     Returns:
         bool: True if delivered successfully, False otherwise.
     """
+    if not media:
+        return True
+
     for attempt in range(1, max_retries + 1):
         try:
             await bot.send_media_group(
@@ -85,6 +88,7 @@ async def deliver_images_for_email(
 ) -> bool:
     """
     Retrieves stored image records for an email address and delivers them as Telegram albums.
+    Ensures photos and documents are dispatched in uniform media type groups to satisfy Telegram API.
 
     Args:
         bot (Bot): Telegram Bot instance.
@@ -140,11 +144,24 @@ async def deliver_images_for_email(
     except Exception as e:
         logger.error(f"Failed to send delivery header message: {e}")
 
-    # Chunk images into batches of MAX_MEDIA_PER_ALBUM (10)
-    image_batches = chunk_list(all_images, MAX_MEDIA_PER_ALBUM)
+    # Group contiguous images of the same file_type to prevent mixing photos & documents in a single sendMediaGroup
+    grouped_batches: List[List[Image]] = []
+    current_batch: List[Image] = []
+
+    for img in all_images:
+        if not current_batch:
+            current_batch.append(img)
+        elif len(current_batch) >= MAX_MEDIA_PER_ALBUM or current_batch[0].file_type != img.file_type:
+            grouped_batches.append(current_batch)
+            current_batch = [img]
+        else:
+            current_batch.append(img)
+
+    if current_batch:
+        grouped_batches.append(current_batch)
 
     delivered_count = 0
-    for idx, batch in enumerate(image_batches):
+    for idx, batch in enumerate(grouped_batches):
         media_group: List[MediaUnion] = []
         for img in batch:
             if img.file_type == "document":

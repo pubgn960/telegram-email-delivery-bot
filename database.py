@@ -4,6 +4,8 @@ SHA256 fingerprint deduplication, CSV export, backup, and restore helpers.
 """
 
 import os
+import io
+import csv
 import shutil
 import hashlib
 import logging
@@ -18,12 +20,13 @@ from models import Base, Order, Image
 
 logger = logging.getLogger(__name__)
 
+# Extra connect_args for SQLite to prevent locking under concurrency
+engine_args: Dict[str, Any] = {"echo": False, "future": True}
+if Config.DATABASE_URL.startswith("sqlite"):
+    engine_args["connect_args"] = {"timeout": 30}
+
 # SQLAlchemy Async Engine initialization
-engine = create_async_engine(
-    Config.DATABASE_URL,
-    echo=False,
-    future=True
-)
+engine = create_async_engine(Config.DATABASE_URL, **engine_args)
 
 # Async Session Maker
 AsyncSessionLocal = async_sessionmaker(
@@ -31,6 +34,12 @@ AsyncSessionLocal = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False
 )
+
+
+async def dispose_engine() -> None:
+    """Disposes active database engine connection pool."""
+    logger.info("Disposing database connection engine...")
+    await engine.dispose()
 
 
 def compute_fingerprint(email: str, file_ids: List[str]) -> str:
@@ -239,7 +248,7 @@ async def cleanup_old_records(days: int) -> int:
 
 async def export_orders_to_csv() -> str:
     """
-    Generates CSV formatted string containing all orders export data.
+    Generates CSV formatted string containing all orders export data using standard csv module.
     Columns: Email, Images, Created, Delivered
     """
     async with AsyncSessionLocal() as session:
@@ -247,19 +256,21 @@ async def export_orders_to_csv() -> str:
         res = await session.execute(stmt)
         orders = res.unique().scalars().all()
 
-        lines = ["Email,Images,Created,Delivered"]
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(["Email", "Images", "Created", "Delivered"])
+
         for o in orders:
             created_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S")
             delivered_str = o.delivered_at.strftime("%Y-%m-%d %H:%M:%S") if o.delivered_at else "Pending"
-            lines.append(f'"{o.email}",{len(o.images)},"{created_str}","{delivered_str}"')
+            writer.writerow([o.email, len(o.images), created_str, delivered_str])
 
-        return "\n".join(lines)
+        return output.getvalue()
 
 
 async def get_db_file_path() -> Optional[str]:
     """Helper to get SQLite database file path if using SQLite."""
     if Config.DATABASE_URL.startswith("sqlite"):
-        # e.g. sqlite+aiosqlite:///bot_database.db -> bot_database.db
         path = Config.DATABASE_URL.split("///")[-1]
         if os.path.exists(path):
             return path

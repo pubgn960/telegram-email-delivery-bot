@@ -37,19 +37,6 @@ setup_logging()
 logger = logging.getLogger("main")
 
 
-async def post_init(application: Application) -> None:
-    """Post-initialization callback run before bot starts receiving updates."""
-    logger.info("Initializing database schema...")
-    await init_db()
-
-    if Config.CLEANUP_DAYS > 0:
-        cleaned = await cleanup_old_records(Config.CLEANUP_DAYS)
-        if cleaned > 0:
-            logger.info(f"Startup retention check purged {cleaned} expired records.")
-
-    logger.info("Bot initialization complete. Active and listening for updates...")
-
-
 async def periodic_cleanup_task() -> None:
     """Background task running every 24 hours to automatically purge old records."""
     while True:
@@ -62,6 +49,22 @@ async def periodic_cleanup_task() -> None:
             break
         except Exception as e:
             logger.error(f"Error in periodic cleanup task: {e}")
+
+
+async def post_init(application: Application) -> None:
+    """Post-initialization callback run inside the active application event loop."""
+    logger.info("Initializing database schema...")
+    await init_db()
+
+    if Config.CLEANUP_DAYS > 0:
+        cleaned = await cleanup_old_records(Config.CLEANUP_DAYS)
+        if cleaned > 0:
+            logger.info(f"Startup retention check purged {cleaned} expired records.")
+
+    # Schedule background cleanup task in active event loop
+    asyncio.create_task(periodic_cleanup_task())
+
+    logger.info("Bot initialization complete. Active and listening for updates...")
 
 
 def main() -> None:
@@ -109,10 +112,6 @@ def main() -> None:
         ),
         group=2
     )
-
-    # Start background retention loop
-    loop = asyncio.get_event_loop()
-    loop.create_task(periodic_cleanup_task())
 
     logger.info("Bot running in polling mode. Press Ctrl+C to stop.")
     application.run_polling(drop_pending_updates=True)
