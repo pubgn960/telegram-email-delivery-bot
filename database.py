@@ -2,6 +2,8 @@
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
 backup/restore, and detailed statistics dashboard.
+
+Supports both PostgreSQL (production via Railway) and SQLite (development).
 """
 
 import os
@@ -12,7 +14,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple, Dict, Any
-from sqlalchemy import select, func, delete, update
+from sqlalchemy import select, func, delete, update, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
@@ -25,6 +27,11 @@ logger = logging.getLogger(__name__)
 engine_args: Dict[str, Any] = {"echo": False, "future": True}
 if Config.DATABASE_URL.startswith("sqlite"):
     engine_args["connect_args"] = {"timeout": 30}
+elif Config.DATABASE_URL.startswith("postgresql+asyncpg://"):
+    # PostgreSQL specific optimizations
+    engine_args["pool_size"] = 10
+    engine_args["max_overflow"] = 20
+    engine_args["pool_pre_ping"] = True
 
 # SQLAlchemy Async Engine initialization
 engine = create_async_engine(Config.DATABASE_URL, **engine_args)
@@ -39,7 +46,7 @@ AsyncSessionLocal = async_sessionmaker(
 
 async def dispose_engine() -> None:
     """Disposes active database engine connection pool."""
-    logger.info("Disposing database connection engine...")
+    logger.info("[DB] Disposing database connection engine...")
     await engine.dispose()
 
 
@@ -55,14 +62,51 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
     return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
 
 
-async def init_db() -> None:
-    """Initializes database schema and default Settings record."""
-    logger.info("Initializing database tables...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database initialized successfully.")
+async def verify_db_connection() -> bool:
+    """
+    Verifies database connectivity by executing a simple query.
+    Returns True on success, False on failure.
+    """
+    try:
+        async with engine.connect() as conn:
+            if Config.DATABASE_URL.startswith("postgresql+asyncpg://"):
+                await conn.execute(text("SELECT 1"))
+                logger.info("[DB] PostgreSQL connected.")
+            else:
+                await conn.execute(text("SELECT 1"))
+                logger.info("[DB] SQLite connected.")
+        return True
+    except Exception as e:
+        logger.error(f"[DB] Connection verification failed: {e}")
+        return False
 
+
+async def init_db() -> None:
+    """
+    Initializes database schema and default Settings record.
+    - Verifies connection before proceeding
+    - Creates all tables if they don't exist
+    - Never recreates or overwrites existing tables
+    - Initializes default Settings record if missing
+    """
+    logger.info("[DB] Initializing database...")
+    
+    # Verify connection first
+    if not await verify_db_connection():
+        raise RuntimeError("[DB] Failed to establish database connection")
+    
+    logger.info("[DB] Creating tables if not exist...")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("[DB] Tables verified.")
+    except Exception as e:
+        logger.error(f"[DB] Error creating tables: {e}")
+        raise
+
+    # Initialize Settings record
     await get_or_create_settings()
+    logger.info("[DB] Settings loaded successfully.")
 
 
 # ==========================================
@@ -88,7 +132,7 @@ async def get_or_create_settings() -> Settings:
             session.add(settings)
             await session.commit()
             await session.refresh(settings)
-            logger.info("Initialized default Settings record in database.")
+            logger.info("[DB] Initialized default Settings record in database.")
 
         return settings
 
@@ -578,3 +622,4 @@ async def get_db_file_path() -> Optional[str]:
         if os.path.exists(path):
             return path
     return None
+

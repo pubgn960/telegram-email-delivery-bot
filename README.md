@@ -7,6 +7,8 @@
 
 A self-configuring, privacy-protected production Telegram bot built with **Python 3.12** and **python-telegram-bot v22+**. Operates on a production **Two-Group Reply-Based Workflow** with **Telegram Reactions** (`📥` order received, `❤️` delivery completed) and **Complete Privacy Protection** (zero customer names/usernames exposed).
 
+**Database**: PostgreSQL on Railway (production) | SQLite (local development)
+
 ---
 
 ## 🏗 Two-Group Architecture & Workflow
@@ -111,6 +113,30 @@ Delivered:
 
 ---
 
+## 🗄️ Database Configuration
+
+### Production (Railway)
+The bot automatically uses **PostgreSQL** when deployed on Railway:
+- Railway automatically injects `DATABASE_URL` as a PostgreSQL connection string
+- Connection is handled via `asyncpg` driver for high-performance async operations
+- Tables are created automatically on first startup
+- Existing data is preserved across redeploys
+
+### Development (Local)
+Falls back to **SQLite** if `DATABASE_URL` is not set:
+```bash
+# Will use local SQLite
+python main.py
+
+# With explicit PostgreSQL (if database is accessible)
+export DATABASE_URL="postgresql+asyncpg://user:pass@localhost/bot_db"
+python main.py
+```
+
+**Note**: Source and Delivery Group configurations persist permanently across restarts and redeploys.
+
+---
+
 ## ⚙️ Environment Variables (Zero Group IDs Required)
 
 Only **3 environment variables** are required:
@@ -119,7 +145,7 @@ Only **3 environment variables** are required:
 | :--- | :--- | :--- |
 | `BOT_TOKEN` | Bot API Token from Telegram `@BotFather` | `1234567890:ABCdefGHIjkl...` |
 | `ADMIN_IDS` | Comma-separated list of Admin Telegram User IDs | `123456789,987654321` |
-| `DATABASE_URL` | Async SQLAlchemy Connection String | `sqlite+aiosqlite:///bot_database.db` |
+| `DATABASE_URL` | *(Optional)* PostgreSQL connection string (auto-injected on Railway) | `postgresql+asyncpg://user:pass@host/db` |
 
 ---
 
@@ -140,3 +166,4 @@ Only **3 environment variables** are required:
 - `/backup` - Download SQLite database backup file.
 - `/restore` - Restore SQLite database from attached `.db` file.
 - `/resetgroups` - Clear group configurations in DB.
+
