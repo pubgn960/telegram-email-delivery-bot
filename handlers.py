@@ -1,7 +1,7 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
-Implements the Reply-Based Delivery Workflow, Order Registration, Loader Validation,
-and self-configuring Admin Commands (/source, /delivery, /groups, /status, /stats, etc.).
+Implements the Two-Group Reply-Based Workflow (Client Group & Loader Group), Order Forwarding,
+Loader Reply Validation, Duplicate Delivery Protection, Order Management Commands, and System Stats.
 """
 
 import io
@@ -10,12 +10,13 @@ import sys
 import html
 import shutil
 import logging
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 
 from config import Config
-from email_parser import extract_email, extract_order_id
+from email_parser import extract_email, extract_order_id, extract_package
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -25,12 +26,16 @@ from database import (
     remove_source_group,
     remove_delivery_group,
     reset_groups,
-    create_pending_order,
+    create_order,
+    set_order_loader_message_id,
     get_order_by_id,
+    get_order_by_loader_msg_id,
+    get_pending_orders,
+    get_delivered_orders,
     get_all_orders_by_email,
     delete_orders_by_email,
-    get_stats,
-    get_pending_orders,
+    cancel_order,
+    get_detailed_stats,
     export_orders_to_csv,
     get_db_file_path,
     dispose_engine,
@@ -49,15 +54,16 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Reply-Based Source Group Handler
+# Two-Group Workflow Message Handlers
 # ==========================================
 
 async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Monitors messages in the Source Group (Loader Group).
-    Enforces Reply-Based Order Mapping:
-    1. If message contains email & is NOT replying to an order: Creates a new Order and posts Order Header into group.
-    2. If message contains images: MUST be a reply to an Order Notification message. Otherwise, rejects.
+    Monitors messages in Group 1 (Client Group).
+    When a customer sends an order message containing an email:
+    1. Registers new Order in DB with status 'Pending'.
+    2. Formats and forwards Order Notification message to Group 2 (Loader Group).
+    3. Saves loader_message_id in DB to associate future replies.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -66,107 +72,70 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not message or not chat:
         return
 
-    # Read current Source Group configuration dynamically from DB
     settings = await get_current_settings()
-    configured_source_id = settings.source_group_id
+    configured_client_id = settings.source_group_id
 
-    # If no Source Group configured yet, ignore message
-    if not configured_source_id:
-        return
-
-    # Enforce chat ID match against configured Source Group
-    if chat.id != configured_source_id:
+    # Must match configured Client Group
+    if not configured_client_id or chat.id != configured_client_id:
         return
 
     text_content = message.text or message.caption or ""
-    is_media = bool(message.photo or (message.document and (message.document.mime_type or "").startswith("image/")))
-
-    # -------------------------------------------------------------
-    # CASE 1: Customer Order Registration (Message contains email)
-    # -------------------------------------------------------------
-    email_in_msg = extract_email(text_content) if text_content else None
-    
-    # If text contains an email and is NOT a media reply uploading to an existing order
-    if email_in_msg and not is_media and not message.reply_to_message:
-        # Create new order record in DB
-        new_order = await create_pending_order(email_in_msg)
-        email_escaped = html.escape(email_in_msg)
-
-        order_notice_text = (
-            f"📦 <b>New Order</b>\n\n"
-            f"<b>Email:</b>\n{email_escaped}\n\n"
-            f"<b>Order ID:</b>\n{new_order.id}"
-        )
-
-        logger.info(f"Order Forwarded | Order ID: {new_order.id} | Email: {email_in_msg}")
-        await message.reply_text(order_notice_text, parse_mode="HTML")
-
-        if user:
-            user_session_manager.update_session(user.id, email_in_msg)
+    if not text_content:
         return
 
-    # -------------------------------------------------------------
-    # CASE 2: Loader Image Upload (Must be a reply to an order)
-    # -------------------------------------------------------------
-    if is_media:
-        reply_to = message.reply_to_message
+    email = extract_email(text_content)
+    if not email:
+        return
 
-        # Rule: When bot receives images, it MUST verify the message is a reply.
-        if not reply_to:
-            logger.info("Invalid Reply | Loader sent images without replying to an order message.")
-            await message.reply_text(
-                "❌ Please reply to the original order message before sending images.",
-                reply_to_message_id=message.message_id
+    # Extract package description and customer name
+    package_desc = extract_package(text_content)
+    customer_name = f"@{user.username}" if (user and user.username) else (user.first_name if user else "Customer")
+    customer_escaped = html.escape(customer_name)
+    email_escaped = html.escape(email)
+    pkg_escaped = html.escape(package_desc)
+
+    # 1. Create Pending Order in DB
+    order = await create_order(
+        email=email,
+        client_chat_id=chat.id,
+        original_message_id=message.message_id,
+        package=package_desc
+    )
+
+    created_time_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
+
+    # 2. Format Order Notification for Loader Group
+    loader_order_text = (
+        f"📦 <b>NEW ORDER</b>\n\n"
+        f"<b>Order ID:</b> #{order.id}\n"
+        f"<b>Package:</b> {pkg_escaped}\n"
+        f"<b>Email:</b> {email_escaped}\n"
+        f"<b>Customer:</b> {customer_escaped}\n"
+        f"<b>Time:</b> {created_time_str}"
+    )
+
+    logger.info(f"New Order | Order ID: #{order.id} | Email: {email} | Package: '{package_desc}'")
+
+    # 3. Post / Forward Order Notification to Loader Group
+    loader_group_id = settings.delivery_group_id
+    if loader_group_id:
+        try:
+            forwarded_msg = await context.bot.send_message(
+                chat_id=loader_group_id,
+                text=loader_order_text,
+                parse_mode="HTML"
             )
-            return
-
-        # Extract Order ID and Email from the replied-to message
-        reply_text = reply_to.text or reply_to.caption or ""
-        order_id = extract_order_id(reply_text)
-        email_from_reply = extract_email(reply_text)
-
-        if not order_id:
-            logger.info("Invalid Reply | Reply target does not contain a valid Order ID.")
-            await message.reply_text(
-                "❌ Invalid order message.",
-                reply_to_message_id=message.message_id
-            )
-            return
-
-        # Verify order exists in DB
-        existing_order = await get_order_by_id(order_id)
-        if not existing_order:
-            logger.info(f"Invalid Reply | Order ID {order_id} not found in database.")
-            await message.reply_text(
-                "❌ Invalid order message.",
-                reply_to_message_id=message.message_id
-            )
-            return
-
-        target_email = email_from_reply or existing_order.email
-        if not target_email:
-            logger.info(f"Invalid Reply | Unable to determine customer email for Order ID {order_id}.")
-            await message.reply_text(
-                "❌ Unable to determine customer email.",
-                reply_to_message_id=message.message_id
-            )
-            return
-
-        logger.info(f"Loader Reply Received | Order ID: {order_id} | Email: {target_email}")
-        
-        # Buffer and process media via collector
-        await media_collector.add_reply_media_message(
-            message=message,
-            order_id=order_id,
-            email=target_email,
-            bot=context.bot
-        )
+            await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+            logger.info(f"Forwarded Order | Order ID: #{order.id} -> Loader Group ({loader_group_id})")
+        except Exception as e:
+            logger.error(f"Failed to post Order #{order.id} to Loader Group: {e}")
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Monitors messages in the Delivery Group.
-    If an email is posted in the Delivery Group, attempts to deliver newest pending order.
+    Monitors messages in Group 2 (Loader Group).
+    Validates that incoming images/documents are sent strictly as a reply to a valid bot Order Message.
+    Identifies order by DB lookup and triggers album debouncing and automatic delivery.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -175,24 +144,77 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     settings = await get_current_settings()
-    configured_delivery_id = settings.delivery_group_id
+    configured_loader_id = settings.delivery_group_id
 
-    if not configured_delivery_id or chat.id != configured_delivery_id:
+    # Must match configured Loader Group
+    if not configured_loader_id or chat.id != configured_loader_id:
         return
 
-    text_content = message.text or message.caption or ""
-    if not text_content:
+    is_media = bool(message.photo or (message.document and (message.document.mime_type or "").startswith("image/")))
+    if not is_media:
         return
 
-    email = extract_email(text_content)
-    if email:
-        logger.info(f"Email delivery trigger detected in Delivery Group for: {email}")
-        await deliver_images_for_email(
-            bot=context.bot,
-            chat_id=chat.id,
-            email=email,
+    reply_to = message.reply_to_message
+
+    # Rule 1: Message MUST be a reply
+    if not reply_to:
+        logger.info("Invalid Reply | Loader sent images without replying to an order message.")
+        await message.reply_text(
+            "❌ Please reply to the original order message.",
             reply_to_message_id=message.message_id
         )
+        return
+
+    # Rule 2: Identify order from database using replied message ID or text Order ID
+    order = await get_order_by_loader_msg_id(reply_to.message_id)
+    if not order:
+        reply_text = reply_to.text or reply_to.caption or ""
+        order_id_from_text = extract_order_id(reply_text)
+        if order_id_from_text:
+            order = await get_order_by_id(order_id_from_text)
+
+    if not order:
+        logger.info(f"Invalid Reply | Replied message {reply_to.message_id} is not a valid bot order message.")
+        await message.reply_text(
+            "❌ Please reply to the original order message.",
+            reply_to_message_id=message.message_id
+        )
+        return
+
+    # Rule 3: Check Order Status (Duplicate Protection & State Check)
+    if order.status == "Delivered":
+        logger.info(f"Duplicate Delivery | Loader replied to already delivered Order #{order.id}.")
+        await message.reply_text(
+            "⚠️ This order has already been delivered.",
+            reply_to_message_id=message.message_id
+        )
+        return
+
+    if order.status == "Cancelled":
+        logger.info(f"Cancelled Order | Loader replied to cancelled Order #{order.id}.")
+        await message.reply_text(
+            f"❌ Order #{order.id} has been cancelled.",
+            reply_to_message_id=message.message_id
+        )
+        return
+
+    if order.status == "Expired":
+        logger.info(f"Timeout | Loader replied to expired Order #{order.id}.")
+        await message.reply_text(
+            f"⏰ Order #{order.id} has expired (Pending Too Long).",
+            reply_to_message_id=message.message_id
+        )
+        return
+
+    logger.info(f"Loader Reply | Order ID: #{order.id} | Email: {order.email}")
+
+    # Pass media to collector
+    await media_collector.add_reply_media_message(
+        message=message,
+        order_id=order.id,
+        email=order.email,
+        bot=context.bot
+    )
 
 
 # ==========================================
@@ -231,20 +253,20 @@ async def verify_admin_and_group(update: Update, context: ContextTypes.DEFAULT_T
 
 async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /source command run inside the Source Group.
-    Saves Chat ID and Name to DB as Source Group.
+    /source command run inside Group 1 (Client Group).
+    Saves Chat ID and Name to DB as Client Group.
     """
     if not await verify_admin_and_group(update, context):
         return
 
     chat = update.effective_chat
-    group_name = chat.title or "Orders Group"
+    group_name = chat.title or "Client Group"
 
     settings = await update_source_group(chat.id, group_name)
     title_escaped = html.escape(settings.source_group_title or group_name)
 
     reply_msg = (
-        f"✅ <b>Source Group Saved</b>\n\n"
+        f"✅ <b>Client Group Saved</b>\n\n"
         f"<b>Group:</b>\n{title_escaped}\n\n"
         f"<b>ID:</b>\n<code>{settings.source_group_id}</code>"
     )
@@ -253,20 +275,20 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /delivery command run inside the Delivery Group.
-    Saves Chat ID and Name to DB as Delivery Group.
+    /delivery command run inside Group 2 (Loader Group).
+    Saves Chat ID and Name to DB as Loader Group.
     """
     if not await verify_admin_and_group(update, context):
         return
 
     chat = update.effective_chat
-    group_name = chat.title or "Delivery Group"
+    group_name = chat.title or "Loader Group"
 
     settings = await update_delivery_group(chat.id, group_name)
     title_escaped = html.escape(settings.delivery_group_title or group_name)
 
     reply_msg = (
-        f"✅ <b>Delivery Group Saved</b>\n\n"
+        f"✅ <b>Loader Group Saved</b>\n\n"
         f"<b>Group:</b>\n{title_escaped}\n\n"
         f"<b>ID:</b>\n<code>{settings.delivery_group_id}</code>"
     )
@@ -284,8 +306,8 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     del_title = html.escape(settings.delivery_group_title or "Unconfigured")
 
     msg = (
-        f"📥 <b>Source Group</b>\n\n{src_title}\n\n"
-        f"📤 <b>Delivery Group</b>\n\n{del_title}\n\n"
+        f"📥 <b>Client Group</b>\n\n{src_title}\n\n"
+        f"📤 <b>Loader Group</b>\n\n{del_title}\n\n"
         f"<b>Status</b>\n\nReady"
     )
     await update.effective_message.reply_text(msg, parse_mode="HTML")
@@ -306,7 +328,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     settings = await get_current_settings()
-    stats = await get_stats()
+    stats = await get_detailed_stats()
 
     src_str = html.escape(settings.source_group_title or "Unconfigured")
     if settings.source_group_id:
@@ -320,10 +342,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "🤖 <b>Bot Status</b>\n\n"
         f"<b>Status:</b> Online\n"
         f"<b>Database:</b> Connected ({get_db_type_name()})\n"
-        f"<b>Source Group:</b> {src_str}\n"
-        f"<b>Delivery Group:</b> {del_str}\n"
-        f"<b>Orders Stored:</b> {stats['total_orders']}\n"
-        f"<b>Images Stored:</b> {stats['total_images']}\n"
+        f"<b>Client Group:</b> {src_str}\n"
+        f"<b>Loader Group:</b> {del_str}\n"
+        f"<b>Total Orders:</b> {stats['total_orders']}\n"
+        f"<b>Pending Orders:</b> {stats['pending_orders']}\n"
+        f"<b>Delivered Orders:</b> {stats['delivered_orders']}\n"
         f"<b>Version:</b> v1.0.0\n"
         f"<b>Uptime:</b> {get_uptime_str()}"
     )
@@ -340,145 +363,221 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     del_ok = bool(settings.delivery_group_id)
 
     lines = [
-        "🤖 <b>Self-Configuring Setup Wizard</b>\n",
-        f"{'✅' if src_ok else '❌'} <b>Source Group:</b> {html.escape(settings.source_group_title or 'Unconfigured')}",
-        f"{'✅' if del_ok else '❌'} <b>Delivery Group:</b> {html.escape(settings.delivery_group_title or 'Unconfigured')}\n",
+        "🤖 <b>Two-Group Reply-Based Setup Wizard</b>\n",
+        f"{'✅' if src_ok else '❌'} <b>Client Group:</b> {html.escape(settings.source_group_title or 'Unconfigured')}",
+        f"{'✅' if del_ok else '❌'} <b>Loader Group:</b> {html.escape(settings.delivery_group_title or 'Unconfigured')}\n",
         "<b>Setup Instructions:</b>",
-        "1. Add bot to Source Group → Promote to Admin → Send <code>/source</code>",
-        "2. Add bot to Delivery Group → Promote to Admin → Send <code>/delivery</code>"
+        "1. Add bot to Client Group → Promote to Admin → Send <code>/source</code>",
+        "2. Add bot to Loader Group → Promote to Admin → Send <code>/delivery</code>"
     ]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
-async def removesource_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /removesource command."""
-    if not await check_admin_permission(update):
-        return
-
-    await remove_source_group()
-    await update.effective_message.reply_text("✅ Source Group Removed Successfully.", parse_mode="HTML")
-
-
-async def removedelivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /removedelivery command."""
-    if not await check_admin_permission(update):
-        return
-
-    await remove_delivery_group()
-    await update.effective_message.reply_text("✅ Delivery Group Removed Successfully.", parse_mode="HTML")
-
-
 # ==========================================
-# Additional Admin Commands
+# New & Enhanced Order Management Commands
 # ==========================================
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command."""
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /pending command listing all pending orders."""
     if not await check_admin_permission(update):
         return
 
-    user = update.effective_user
-    name = html.escape(user.first_name if user else "Admin")
-    settings = await get_current_settings()
-
-    welcome_msg = (
-        f"🤖 <b>Telegram Email Image Delivery Bot v1.0.0</b>\n\n"
-        f"Welcome {name}! You are authenticated as a bot administrator.\n\n"
-        f"📥 <b>Source Group</b>: {html.escape(settings.source_group_title or 'Unconfigured')}\n"
-        f"📤 <b>Delivery Group</b>: {html.escape(settings.delivery_group_title or 'Unconfigured')}\n\n"
-        f"Type <code>/help</code> or <code>/setup</code> for guidance."
-    )
-    await update.effective_message.reply_text(welcome_msg, parse_mode="HTML")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /help command listing all commands."""
-    if not await check_admin_permission(update):
+    pending = await get_pending_orders()
+    if not pending:
+        await update.effective_message.reply_text("✅ No pending orders! All orders delivered.")
         return
 
-    help_msg = (
-        "🛠 <b>Admin Commands & Management Suite</b>\n\n"
-        "<b>Group Configuration:</b>\n"
-        "• <code>/source</code> - Mark current group as Source Group\n"
-        "• <code>/delivery</code> - Mark current group as Delivery Group\n"
-        "• <code>/groups</code> - Show group status\n"
-        "• <code>/resetgroups</code> - Reset all group settings\n"
-        "• <code>/status</code> - Display bot system status\n"
-        "• <code>/setup</code> - View setup guide\n"
-        "• <code>/removesource</code> - Remove Source Group\n"
-        "• <code>/removedelivery</code> - Remove Delivery Group\n\n"
-        "<b>Order & Data Management:</b>\n"
-        "• <code>/find &lt;email&gt;</code> - Search order history for email\n"
-        "• <code>/resend &lt;email&gt;</code> - Deliver stored images for email\n"
-        "• <code>/delete &lt;email&gt;</code> - Delete records for email\n"
-        "• <code>/stats</code> - Database metrics dashboard\n"
-        "• <code>/pending</code> - List undelivered orders\n"
-        "• <code>/export</code> - Export CSV report\n"
-        "• <code>/backup</code> - Download SQLite DB backup\n"
-        "• <code>/restore</code> - Restore SQLite DB from backup file\n"
-    )
-    await update.effective_message.reply_text(help_msg, parse_mode="HTML")
+    details = [f"⏳ <b>Pending Orders ({len(pending)})</b>:\n"]
+    for idx, order in enumerate(pending[:15], 1):
+        created_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
+        email_escaped = html.escape(order.email)
+        pkg_escaped = html.escape(order.package or "Standard Package")
+        details.append(f"{idx}. Order <code>#{order.id}</code> | Email: <code>{email_escaped}</code>\n    Package: <i>{pkg_escaped}</i> | Created: <code>{created_str}</code>")
 
-
-async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /find command to search order history for an email."""
-    if not await check_admin_permission(update):
-        return
-
-    if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: <code>/find email@example.com</code>", parse_mode="HTML")
-        return
-
-    raw_input = " ".join(context.args)
-    email = extract_email(raw_input)
-
-    if not email:
-        await update.effective_message.reply_text("❌ Invalid email format provided.")
-        return
-
-    orders = await get_all_orders_by_email(email)
-    if not orders:
-        await update.effective_message.reply_text(f"❌ No records found for email: <code>{html.escape(email)}</code>", parse_mode="HTML")
-        return
-
-    total_imgs = sum(len(o.images) for o in orders)
-    email_escaped = html.escape(email)
-    details = [f"🔍 <b>Found {len(orders)} order(s) for email</b>: <code>{email_escaped}</code>\nTotal Images: <b>{total_imgs}</b>\n"]
-
-    for idx, order in enumerate(orders, 1):
-        created_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M:%S UTC") if order.delivered_at else "Pending"
-        img_count = len(order.images)
-        details.append(f"{idx}. Order <code>{order.id}</code> | Created: <code>{created_str}</code> | Status: <code>{delivered_str}</code> | Images: <code>{img_count}</code>")
+    if len(pending) > 15:
+        details.append(f"\n... and {len(pending) - 15} more pending order(s).")
 
     await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
 
 
-async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /resend command to manually trigger image delivery."""
+async def delivered_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /delivered command showing latest delivered orders."""
+    if not await check_admin_permission(update):
+        return
+
+    delivered = await get_delivered_orders(limit=15)
+    if not delivered:
+        await update.effective_message.reply_text("ℹ️ No delivered orders found.")
+        return
+
+    details = [f"✅ <b>Latest Delivered Orders ({len(delivered)})</b>:\n"]
+    for idx, order in enumerate(delivered, 1):
+        delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
+        email_escaped = html.escape(order.email)
+        details.append(f"{idx}. Order <code>#{order.id}</code> | Email: <code>{email_escaped}</code> | Images: <code>{len(order.images)}</code> | Delivered: <code>{delivered_str}</code>")
+
+    await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
+
+
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /find <order_id_or_email> command."""
     if not await check_admin_permission(update):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: <code>/resend email@example.com</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ Usage: <code>/find 10025</code> or <code>/find email@example.com</code>", parse_mode="HTML")
         return
 
-    raw_input = " ".join(context.args)
-    email = extract_email(raw_input)
+    raw_arg = context.args[0].strip()
 
-    if not email:
-        await update.effective_message.reply_text("❌ Invalid email format provided.")
+    # If numeric, search by Order ID
+    if raw_arg.lstrip("#").isdigit():
+        order_id = int(raw_arg.lstrip("#"))
+        order = await get_order_by_id(order_id)
+        if not order:
+            await update.effective_message.reply_text(f"❌ Order <code>#{order_id}</code> not found.", parse_mode="HTML")
+            return
+        orders = [order]
+    else:
+        email = extract_email(raw_arg)
+        if not email:
+            await update.effective_message.reply_text("❌ Invalid Order ID or email format.")
+            return
+        orders = await get_all_orders_by_email(email)
+
+    if not orders:
+        await update.effective_message.reply_text("❌ No matching orders found.")
         return
 
-    target_chat_id = update.effective_chat.id
-    await update.effective_message.reply_text(f"⏳ Processing re-delivery for <code>{html.escape(email)}</code>...", parse_mode="HTML")
+    details = [f"🔍 <b>Found {len(orders)} matching order(s)</b>:\n"]
+    for idx, order in enumerate(orders, 1):
+        created_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
+        delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
+        email_escaped = html.escape(order.email)
+        status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status == "Pending" else "❌")
+        details.append(
+            f"{idx}. {status_icon} Order <code>#{order.id}</code> | Status: <b>{order.status}</b>\n"
+            f"    Email: <code>{email_escaped}</code> | Images: <b>{len(order.images)}</b>\n"
+            f"    Created: <code>{created_str}</code> | Delivered: <code>{delivered_str}</code>"
+        )
 
-    await deliver_images_for_email(
-        bot=context.bot,
-        chat_id=target_chat_id,
-        email=email,
-        reply_to_message_id=update.effective_message.message_id
+    await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
+
+
+async def order_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /order <order_id> command displaying complete order information."""
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.effective_message.reply_text("⚠️ Usage: <code>/order 10025</code>", parse_mode="HTML")
+        return
+
+    order_id = int(context.args[0].lstrip("#"))
+    order = await get_order_by_id(order_id)
+
+    if not order:
+        await update.effective_message.reply_text(f"❌ Order <code>#{order_id}</code> not found.", parse_mode="HTML")
+        return
+
+    created_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M:%S UTC") if order.delivered_at else "Pending"
+    email_escaped = html.escape(order.email)
+    pkg_escaped = html.escape(order.package or "Standard Package")
+
+    status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status == "Pending" else "❌")
+
+    msg = (
+        f"📦 <b>Order Detailed Information</b>\n\n"
+        f"<b>Order ID:</b> #{order.id}\n"
+        f"<b>Status:</b> {status_icon} {order.status}\n"
+        f"<b>Email:</b> <code>{email_escaped}</code>\n"
+        f"<b>Package:</b> <i>{pkg_escaped}</i>\n"
+        f"<b>Stored Images:</b> {len(order.images)}\n"
+        f"<b>Client Chat ID:</b> <code>{order.client_chat_id or 'N/A'}</code>\n"
+        f"<b>Loader Msg ID:</b> <code>{order.loader_message_id or 'N/A'}</code>\n"
+        f"<b>Created Time:</b> <code>{created_str}</code>\n"
+        f"<b>Delivered Time:</b> <code>{delivered_str}</code>"
     )
+    await update.effective_message.reply_text(msg, parse_mode="HTML")
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /cancel <order_id> command."""
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.effective_message.reply_text("⚠️ Usage: <code>/cancel 10025</code>", parse_mode="HTML")
+        return
+
+    order_id = int(context.args[0].lstrip("#"))
+    order, success = await cancel_order(order_id)
+
+    if not success or not order:
+        await update.effective_message.reply_text(f"❌ Order <code>#{order_id}</code> not found.", parse_mode="HTML")
+        return
+
+    await update.effective_message.reply_text(f"✅ Order <code>#{order_id}</code> has been cancelled successfully.", parse_mode="HTML")
+
+
+async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /resend <order_id_or_email> command."""
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: <code>/resend 10025</code> or <code>/resend email@example.com</code>", parse_mode="HTML")
+        return
+
+    raw_arg = context.args[0].strip()
+
+    if raw_arg.lstrip("#").isdigit():
+        order_id = int(raw_arg.lstrip("#"))
+        await update.effective_message.reply_text(f"⏳ Processing re-delivery for Order <code>#{order_id}</code>...", parse_mode="HTML")
+        res = await deliver_order_by_id(
+            bot=context.bot,
+            order_id=order_id,
+            target_delivery_chat_id=update.effective_chat.id
+        )
+        if res:
+            await update.effective_message.reply_text(f"✅ Re-delivery of Order <code>#{order_id}</code> completed.", parse_mode="HTML")
+        else:
+            await update.effective_message.reply_text(f"❌ Re-delivery of Order <code>#{order_id}</code> failed.", parse_mode="HTML")
+    else:
+        email = extract_email(raw_arg)
+        if not email:
+            await update.effective_message.reply_text("❌ Invalid Order ID or email format.")
+            return
+
+        await update.effective_message.reply_text(f"⏳ Processing re-delivery for <code>{html.escape(email)}</code>...", parse_mode="HTML")
+        await deliver_images_for_email(
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            email=email,
+            reply_to_message_id=update.effective_message.message_id
+        )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /stats command displaying detailed dashboard statistics."""
+    if not await check_admin_permission(update):
+        return
+
+    stats = await get_detailed_stats()
+
+    msg = (
+        "📊 <b>Bot Statistics Dashboard</b>\n\n"
+        f"📦 <b>Total Orders:</b> <code>{stats['total_orders']}</code>\n"
+        f"⏳ <b>Pending Orders:</b> <code>{stats['pending_orders']}</code>\n"
+        f"✅ <b>Delivered Orders:</b> <code>{stats['delivered_orders']}</code>\n"
+        f"❌ <b>Cancelled Orders:</b> <code>{stats['cancelled_orders']}</code>\n\n"
+        f"📅 <b>Today's Orders:</b> <code>{stats['today_orders']}</code>\n"
+        f"🚀 <b>Today's Deliveries:</b> <code>{stats['today_deliveries']}</code>\n"
+        f"⚡ <b>Avg Delivery Time:</b> <code>{stats['avg_delivery_time']}</code>\n\n"
+        f"⚙️ <b>Retention Limit:</b> <code>{Config.CLEANUP_DAYS} Days</code>"
+    )
+    await update.effective_message.reply_text(msg, parse_mode="HTML")
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -505,48 +604,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(f"❌ No records found for <code>{email_escaped}</code>.", parse_mode="HTML")
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /stats command displaying database statistics."""
-    if not await check_admin_permission(update):
-        return
-
-    stats = await get_stats()
-    msg = (
-        "📊 <b>Bot System & Database Dashboard</b>\n\n"
-        f"📦 <b>Total Orders</b>: <code>{stats['total_orders']}</code>\n"
-        f"🖼 <b>Total Images</b>: <code>{stats['total_images']}</code>\n"
-        f"✉️ <b>Unique Emails</b>: <code>{stats['unique_emails']}</code>\n"
-        f"⏳ <b>Pending Deliveries</b>: <code>{stats['pending_orders']}</code>\n"
-        f"📅 <b>Oldest Record Date</b>: <code>{stats['oldest_order_date']}</code>\n\n"
-        f"⚙️ <b>Retention Limit</b>: <code>{Config.CLEANUP_DAYS} Days</code>"
-    )
-    await update.effective_message.reply_text(msg, parse_mode="HTML")
-
-
-async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /pending command to list undelivered orders."""
-    if not await check_admin_permission(update):
-        return
-
-    pending = await get_pending_orders()
-    if not pending:
-        await update.effective_message.reply_text("✅ All orders have been delivered! No pending uploads.")
-        return
-
-    details = [f"⏳ <b>Found {len(pending)} Undelivered Order(s)</b>:\n"]
-    for idx, order in enumerate(pending[:15], 1):
-        created_str = order.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-        email_escaped = html.escape(order.email)
-        details.append(f"{idx}. Order ID: <code>{order.id}</code> | Email: <code>{email_escaped}</code> | Images: <code>{len(order.images)}</code> | Created: <code>{created_str}</code>")
-
-    if len(pending) > 15:
-        details.append(f"\n... and {len(pending) - 15} more pending order(s).")
-
-    await update.effective_message.reply_text("\n".join(details), parse_mode="HTML")
-
-
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /export command generating and sending a CSV export of all database records."""
+    """Handles /export command generating and sending a CSV export."""
     if not await check_admin_permission(update):
         return
 
@@ -632,3 +691,70 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error restoring database backup: {e}")
         await update.effective_message.reply_text(f"❌ Database restore failed: {e}")
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command."""
+    if not await check_admin_permission(update):
+        return
+
+    user = update.effective_user
+    name = html.escape(user.first_name if user else "Admin")
+    settings = await get_current_settings()
+
+    welcome_msg = (
+        f"🤖 <b>Telegram Email Image Delivery Bot v1.0.0</b>\n\n"
+        f"Welcome {name}! You are authenticated as a bot administrator.\n\n"
+        f"📥 <b>Client Group</b>: {html.escape(settings.source_group_title or 'Unconfigured')}\n"
+        f"📤 <b>Loader Group</b>: {html.escape(settings.delivery_group_title or 'Unconfigured')}\n\n"
+        f"Type <code>/help</code> or <code>/setup</code> for guidance."
+    )
+    await update.effective_message.reply_text(welcome_msg, parse_mode="HTML")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /help command listing all commands."""
+    if not await check_admin_permission(update):
+        return
+
+    help_msg = (
+        "🛠 <b>Admin Commands & Management Suite</b>\n\n"
+        "<b>Group Configuration:</b>\n"
+        "• <code>/source</code> - Mark current group as Client Group\n"
+        "• <code>/delivery</code> - Mark current group as Loader Group\n"
+        "• <code>/groups</code> - Show group status\n"
+        "• <code>/resetgroups</code> - Reset all group settings\n"
+        "• <code>/status</code> - Display bot status\n"
+        "• <code>/setup</code> - View setup guide\n\n"
+        "<b>Order & Data Management:</b>\n"
+        "• <code>/pending</code> - List pending orders\n"
+        "• <code>/delivered</code> - List latest delivered orders\n"
+        "• <code>/find &lt;id_or_email&gt;</code> - Search orders\n"
+        "• <code>/order &lt;id&gt;</code> - Complete order information\n"
+        "• <code>/cancel &lt;id&gt;</code> - Cancel a pending order\n"
+        "• <code>/resend &lt;id&gt;</code> - Re-deliver an order\n"
+        "• <code>/delete &lt;email&gt;</code> - Delete records for email\n"
+        "• <code>/stats</code> - Rich statistics dashboard\n"
+        "• <code>/export</code> - Export CSV report\n"
+        "• <code>/backup</code> - Backup SQLite database\n"
+        "• <code>/restore</code> - Restore SQLite database\n"
+    )
+    await update.effective_message.reply_text(help_msg, parse_mode="HTML")
+
+
+async def removesource_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /removesource command."""
+    if not await check_admin_permission(update):
+        return
+
+    await remove_source_group()
+    await update.effective_message.reply_text("✅ Client Group Removed Successfully.", parse_mode="HTML")
+
+
+async def removedelivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /removedelivery command."""
+    if not await check_admin_permission(update):
+        return
+
+    await remove_delivery_group()
+    await update.effective_message.reply_text("✅ Loader Group Removed Successfully.", parse_mode="HTML")

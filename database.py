@@ -1,6 +1,7 @@
 """
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
-Order ID mapping, SHA256 fingerprint deduplication, CSV export, backup/restore, and Settings management.
+Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
+backup/restore, and detailed statistics dashboard.
 """
 
 import os
@@ -55,13 +56,12 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
 
 
 async def init_db() -> None:
-    """Initializes the database schema and ensures single Settings record exists."""
+    """Initializes database schema and default Settings record."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database initialized successfully.")
 
-    # Initialize single Settings record if missing
     await get_or_create_settings()
 
 
@@ -99,7 +99,7 @@ async def get_current_settings() -> Settings:
 
 
 async def update_source_group(chat_id: int, title: str) -> Settings:
-    """Updates the Source Group configuration in database."""
+    """Updates the Source Group (Client Group) configuration in database."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Settings)
@@ -115,12 +115,12 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
 
         res = await session.execute(select(Settings).where(Settings.id == 1))
         settings = res.scalar_one()
-        logger.info(f"Source Group updated in DB: ID={chat_id}, Title='{title}'")
+        logger.info(f"Client Group updated in DB: ID={chat_id}, Title='{title}'")
         return settings
 
 
 async def update_delivery_group(chat_id: int, title: str) -> Settings:
-    """Updates the Delivery Group configuration in database."""
+    """Updates the Delivery Group (Loader Group) configuration in database."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Settings)
@@ -136,12 +136,12 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
 
         res = await session.execute(select(Settings).where(Settings.id == 1))
         settings = res.scalar_one()
-        logger.info(f"Delivery Group updated in DB: ID={chat_id}, Title='{title}'")
+        logger.info(f"Loader Group updated in DB: ID={chat_id}, Title='{title}'")
         return settings
 
 
 async def remove_source_group() -> Settings:
-    """Removes Source Group configuration from database."""
+    """Removes Client Group configuration from database."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Settings)
@@ -157,12 +157,12 @@ async def remove_source_group() -> Settings:
 
         res = await session.execute(select(Settings).where(Settings.id == 1))
         settings = res.scalar_one()
-        logger.info("Source Group configuration removed from DB.")
+        logger.info("Client Group configuration removed from DB.")
         return settings
 
 
 async def remove_delivery_group() -> Settings:
-    """Removes Delivery Group configuration from database."""
+    """Removes Loader Group configuration from database."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Settings)
@@ -178,12 +178,12 @@ async def remove_delivery_group() -> Settings:
 
         res = await session.execute(select(Settings).where(Settings.id == 1))
         settings = res.scalar_one()
-        logger.info("Delivery Group configuration removed from DB.")
+        logger.info("Loader Group configuration removed from DB.")
         return settings
 
 
 async def reset_groups() -> Settings:
-    """Resets both Source and Delivery Group configurations in database."""
+    """Resets both Client and Loader Group configurations in database."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Settings)
@@ -206,17 +206,28 @@ async def reset_groups() -> Settings:
 
 
 # ==========================================
-# Reply-Based Order & Image Operations
+# Two-Group Order CRUD & Operations
 # ==========================================
 
-async def create_pending_order(email: str) -> Order:
+async def create_order(
+    email: str,
+    client_chat_id: Optional[int] = None,
+    original_message_id: Optional[int] = None,
+    package: str = ""
+) -> Order:
     """
-    Creates a new Order record with customer email and returns the generated Order object (with Order ID).
+    Creates a new Order record in Pending status and returns generated Order object.
     """
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
         new_order = Order(
             email=email_clean,
+            package=package,
+            client_chat_id=client_chat_id,
+            original_message_id=original_message_id,
+            loader_message_id=None,
+            status="Pending",
+            image_count=0,
             media_group_id=None,
             fingerprint=None,
             created_at=datetime.now(timezone.utc)
@@ -225,17 +236,42 @@ async def create_pending_order(email: str) -> Order:
         await session.commit()
         await session.refresh(new_order)
 
-        logger.info(f"Order Created | Order ID: {new_order.id} | Email: {email_clean}")
+        logger.info(f"New Order | Order ID: #{new_order.id} | Email: {email_clean} | Status: Pending")
         return new_order
 
 
+async def set_order_loader_message_id(order_id: int, loader_message_id: int) -> None:
+    """Updates the forwarded loader message ID for an order."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(loader_message_id=loader_message_id)
+        )
+        await session.execute(stmt)
+        await session.commit()
+        logger.info(f"Forwarded Order | Order ID: #{order_id} -> Loader Msg ID: {loader_message_id}")
+
+
 async def get_order_by_id(order_id: int) -> Optional[Order]:
-    """Retrieves an Order record by Order ID with images eagerly loaded."""
+    """Retrieves an Order by Order ID with images eagerly loaded."""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
             .where(Order.id == order_id)
+        )
+        res = await session.execute(stmt)
+        return res.unique().scalar_one_or_none()
+
+
+async def get_order_by_loader_msg_id(loader_msg_id: int) -> Optional[Order]:
+    """Retrieves an Order matching loader_message_id with images eagerly loaded."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Order)
+            .options(joinedload(Order.images))
+            .where(Order.loader_message_id == loader_msg_id)
         )
         res = await session.execute(stmt)
         return res.unique().scalar_one_or_none()
@@ -247,12 +283,7 @@ async def add_images_to_order(
     media_group_id: Optional[str] = None
 ) -> Tuple[Optional[Order], bool]:
     """
-    Adds images to an existing Order by Order ID using SHA256 fingerprint duplicate protection.
-
-    Args:
-        order_id (int): Target Order ID.
-        file_items (List[Tuple[str, str]]): List of (file_id, file_type) tuples.
-        media_group_id (str, optional): Telegram Media Group ID.
+    Adds images to an Order by Order ID using SHA256 fingerprint duplicate protection.
 
     Returns:
         Tuple[Optional[Order], bool]: (Order object, is_duplicate)
@@ -261,13 +292,12 @@ async def add_images_to_order(
         return None, False
 
     async with AsyncSessionLocal() as session:
-        # Verify order exists
         stmt = select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
         res = await session.execute(stmt)
         order = res.unique().scalar_one_or_none()
 
         if not order:
-            logger.warning(f"Attempted to add images to non-existent Order ID: {order_id}")
+            logger.warning(f"Attempted to add images to non-existent Order ID: #{order_id}")
             return None, False
 
         file_ids = [item[0] for item in file_items]
@@ -277,20 +307,18 @@ async def add_images_to_order(
         fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
         fp_res = await session.execute(fp_stmt)
         if fp_res.scalar_one_or_none():
-            logger.info(f"Duplicate Ignored | Fingerprint duplicate for Order ID: {order_id}")
+            logger.info(f"Duplicate Delivery | Fingerprint duplicate for Order ID: #{order_id}")
             return order, True
 
         # Check duplicate media group ID if present
         if media_group_id and order.media_group_id == media_group_id:
-            logger.info(f"Duplicate Ignored | Media group duplicate for Order ID: {order_id}")
+            logger.info(f"Duplicate Delivery | Media group duplicate for Order ID: #{order_id}")
             return order, True
 
-        # Update order fingerprint and media_group_id
         order.fingerprint = fingerprint
         if media_group_id:
             order.media_group_id = media_group_id
 
-        # Determine current starting position index
         start_pos = len(order.images)
         for idx, (file_id, file_type) in enumerate(file_items):
             img = Image(
@@ -301,67 +329,102 @@ async def add_images_to_order(
             )
             session.add(img)
 
+        order.image_count = start_pos + len(file_items)
         await session.commit()
 
-        # Reload eager order
         res = await session.execute(
             select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
         )
         updated_order = res.unique().scalar_one()
 
-        logger.info(f"Album Completed | Order ID: {updated_order.id} | Images Added: {len(file_items)} | Total: {len(updated_order.images)}")
+        logger.info(f"Album Completed | Order ID: #{updated_order.id} | Added: {len(file_items)} | Total: {updated_order.image_count}")
         return updated_order, False
 
 
-async def get_newest_order_by_email(email: str) -> Optional[Order]:
-    """Retrieves newest Order for email with images loaded."""
-    email_clean = email.lower().strip()
+async def mark_order_delivered(order_id: int) -> Optional[Order]:
+    """Updates order status to 'Delivered' and sets delivered_at timestamp."""
     async with AsyncSessionLocal() as session:
+        now_utc = datetime.now(timezone.utc)
         stmt = (
-            select(Order)
-            .options(joinedload(Order.images))
-            .where(Order.email == email_clean)
-            .order_by(Order.created_at.desc())
-            .limit(1)
+            update(Order)
+            .where(Order.id == order_id)
+            .values(
+                status="Delivered",
+                delivered_at=now_utc
+            )
         )
-        result = await session.execute(stmt)
-        return result.unique().scalar_one_or_none()
+        await session.execute(stmt)
+        await session.commit()
+
+        res = await session.execute(
+            select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+        )
+        order = res.unique().scalar_one_or_none()
+        logger.info(f"Delivery Completed | Order ID: #{order_id} marked as Delivered.")
+        return order
 
 
-async def get_all_orders_by_email(email: str) -> List[Order]:
-    """Retrieves all Orders for email."""
-    email_clean = email.lower().strip()
+async def cancel_order(order_id: int) -> Tuple[Optional[Order], bool]:
+    """Cancels a pending order."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+        res = await session.execute(stmt)
+        order = res.unique().scalar_one_or_none()
+
+        if not order:
+            return None, False
+
+        if order.status == "Cancelled":
+            return order, True
+
+        upd_stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(status="Cancelled")
+        )
+        await session.execute(upd_stmt)
+        await session.commit()
+
+        order.status = "Cancelled"
+        logger.info(f"Cancelled Order | Order ID: #{order_id} marked as Cancelled.")
+        return order, True
+
+
+async def get_pending_orders() -> List[Order]:
+    """Retrieves all orders in Pending status."""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.email == email_clean)
+            .where(Order.status == "Pending")
             .order_by(Order.created_at.desc())
         )
         result = await session.execute(stmt)
         return list(result.unique().scalars().all())
 
 
-async def mark_order_delivered(order_id: int) -> None:
-    """Updates delivered_at timestamp for an order."""
-    async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Order)
-            .where(Order.id == order_id)
-            .values(delivered_at=datetime.now(timezone.utc))
-        )
-        await session.execute(stmt)
-        await session.commit()
-        logger.info(f"Delivery Completed | Order ID: {order_id} marked as delivered.")
-
-
-async def get_pending_orders() -> List[Order]:
-    """Retrieves all orders that have not yet been delivered (delivered_at IS NULL)."""
+async def get_delivered_orders(limit: int = 15) -> List[Order]:
+    """Retrieves latest delivered orders."""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.delivered_at.is_(None))
+            .where(Order.status == "Delivered")
+            .order_by(Order.delivered_at.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return list(result.unique().scalars().all())
+
+
+async def get_all_orders_by_email(email: str) -> List[Order]:
+    """Retrieves all Orders matching an email."""
+    email_clean = email.lower().strip()
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Order)
+            .options(joinedload(Order.images))
+            .where(Order.email == email_clean)
             .order_by(Order.created_at.desc())
         )
         result = await session.execute(stmt)
@@ -387,21 +450,75 @@ async def delete_orders_by_email(email: str) -> int:
         return count
 
 
-async def get_stats() -> Dict[str, Any]:
-    """Computes bot statistics dashboard."""
+async def check_order_timeouts(timeout_hours: int = 24) -> int:
+    """
+    Checks for pending orders created longer than timeout_hours ago and marks them Expired.
+    """
+    if timeout_hours <= 0:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
+    async with AsyncSessionLocal() as session:
+        stmt = select(Order).where(Order.status == "Pending", Order.created_at < cutoff)
+        res = await session.execute(stmt)
+        expired_orders = list(res.scalars().all())
+
+        if not expired_orders:
+            return 0
+
+        expired_ids = [o.id for o in expired_orders]
+        upd_stmt = (
+            update(Order)
+            .where(Order.id.in_(expired_ids))
+            .values(status="Expired")
+        )
+        await session.execute(upd_stmt)
+        await session.commit()
+
+        for o in expired_orders:
+            logger.warning(f"Timeout | Order ID: #{o.id} created at {o.created_at} marked as Expired (⏰ Pending Too Long).")
+
+        return len(expired_ids)
+
+
+async def get_detailed_stats() -> Dict[str, Any]:
+    """Computes comprehensive statistics for the bot dashboard."""
     async with AsyncSessionLocal() as session:
         total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
-        total_images = (await session.execute(select(func.count(Image.id)))).scalar() or 0
-        unique_emails = (await session.execute(select(func.count(func.distinct(Order.email))))).scalar() or 0
-        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.delivered_at.is_(None)))).scalar() or 0
-        oldest_date = (await session.execute(select(func.min(Order.created_at)))).scalar()
+        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Pending"))).scalar() or 0
+        delivered_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Delivered"))).scalar() or 0
+        cancelled_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Cancelled"))).scalar() or 0
+
+        # Today's metrics (UTC)
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_orders = (await session.execute(select(func.count(Order.id)).where(Order.created_at >= today_start))).scalar() or 0
+        today_deliveries = (await session.execute(select(func.count(Order.id)).where(Order.delivered_at >= today_start))).scalar() or 0
+
+        # Calculate Average Delivery Time
+        stmt = select(Order.created_at, Order.delivered_at).where(Order.status == "Delivered", Order.delivered_at.isnot(None))
+        res = await session.execute(stmt)
+        del_times = list(res.all())
+
+        avg_delivery_str = "N/A"
+        if del_times:
+            durations = [(d_at - c_at).total_seconds() for c_at, d_at in del_times if d_at and c_at]
+            if durations:
+                avg_seconds = sum(durations) / len(durations)
+                if avg_seconds < 60:
+                    avg_delivery_str = f"{int(avg_seconds)}s"
+                elif avg_seconds < 3600:
+                    avg_delivery_str = f"{int(avg_seconds // 60)}m {int(avg_seconds % 60)}s"
+                else:
+                    avg_delivery_str = f"{round(avg_seconds / 3600, 1)}h"
 
         return {
             "total_orders": total_orders,
-            "total_images": total_images,
-            "unique_emails": unique_emails,
             "pending_orders": pending_orders,
-            "oldest_order_date": oldest_date.strftime("%Y-%m-%d %H:%M:%S UTC") if oldest_date else "N/A"
+            "delivered_orders": delivered_orders,
+            "cancelled_orders": cancelled_orders,
+            "today_orders": today_orders,
+            "today_deliveries": today_deliveries,
+            "avg_delivery_time": avg_delivery_str
         }
 
 
@@ -429,12 +546,12 @@ async def export_orders_to_csv() -> str:
 
         output = io.StringIO()
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(["Order ID", "Email", "Images", "Created", "Delivered"])
+        writer.writerow(["Order ID", "Email", "Package", "Status", "Images", "Created", "Delivered"])
 
         for o in orders:
             created_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S")
             delivered_str = o.delivered_at.strftime("%Y-%m-%d %H:%M:%S") if o.delivered_at else "Pending"
-            writer.writerow([o.id, o.email, len(o.images), created_str, delivered_str])
+            writer.writerow([o.id, o.email, o.package or "N/A", o.status, len(o.images), created_str, delivered_str])
 
         return output.getvalue()
 

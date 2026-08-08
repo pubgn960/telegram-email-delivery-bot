@@ -1,6 +1,6 @@
 """
-Email & Order ID extraction module using regular expressions.
-Parses, sanitizes, and normalizes email addresses and Order IDs from text and photo captions.
+Email, Order ID, and Package extraction module using regular expressions.
+Parses, sanitizes, and normalizes email addresses, Order IDs, and package text from messages.
 """
 
 import re
@@ -15,9 +15,9 @@ EMAIL_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Regex pattern for extracting Order ID numbers (e.g. "Order ID: 12345", "Order #12345", "Order ID 12345")
+# Regex pattern for extracting Order ID numbers (e.g. "Order ID: #10025", "Order #10025", "#10025", "Order ID 10025")
 ORDER_ID_REGEX = re.compile(
-    r'(?:order\s*id|order\s*#|order)\s*[:#\s]*(\d+)',
+    r'(?:order\s*id|order\s*#|order|#)\s*[:#\s]*(\d+)',
     re.IGNORECASE
 )
 
@@ -69,3 +69,33 @@ def extract_order_id(text: Optional[str]) -> Optional[int]:
             pass
 
     return None
+
+
+def extract_package(text: Optional[str]) -> str:
+    """
+    Extracts package/item description from customer message by stripping email line.
+
+    Args:
+        text (str, optional): Input order message text.
+
+    Returns:
+        str: Package text description or default fallback.
+    """
+    if not text:
+        return "Standard Package"
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    package_lines = []
+
+    for line in lines:
+        if EMAIL_REGEX.search(line):
+            continue
+        if line.lower().startswith(("package:", "item:", "order:")):
+            package_lines.append(line.split(":", 1)[-1].strip())
+        else:
+            package_lines.append(line)
+
+    if package_lines:
+        return " | ".join(package_lines[:2])
+
+    return "Standard Package"

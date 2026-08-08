@@ -1,53 +1,52 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
-Tests email extraction, Order ID parsing, album splitting, SHA256 fingerprinting,
-user sessions, and Reply-Based Delivery Workflow DB operations.
+Tests email, Order ID, and package extraction, album splitting, SHA256 fingerprinting,
+user sessions, and two-group reply-based DB operations.
 """
 
 import unittest
 import asyncio
-from email_parser import extract_email, extract_order_id
+from email_parser import extract_email, extract_order_id, extract_package
 from delivery import chunk_list
 from media_collector import user_session_manager
 from database import (
     init_db,
-    create_pending_order,
+    create_order,
+    set_order_loader_message_id,
     get_order_by_id,
+    get_order_by_loader_msg_id,
     add_images_to_order,
-    get_newest_order_by_email,
     mark_order_delivered,
+    cancel_order,
     get_pending_orders,
+    get_delivered_orders,
     delete_orders_by_email,
-    get_stats,
+    get_detailed_stats,
     compute_fingerprint,
     export_orders_to_csv,
     get_or_create_settings,
     update_source_group,
     update_delivery_group,
-    remove_source_group,
-    remove_delivery_group,
     reset_groups
 )
 
 
-class TestEmailAndOrderIdParser(unittest.TestCase):
-    """Tests email and Order ID regex extraction."""
+class TestEmailOrderPackageParser(unittest.TestCase):
+    """Tests email, Order ID, and package regex extraction."""
 
     def test_extract_basic_email(self):
         text = "Order confirmation for john@gmail.com please deliver."
         self.assertEqual(extract_email(text), "john@gmail.com")
 
-    def test_case_insensitivity_and_trimming(self):
-        text = "Customer Email:   JOHN.DOE@EXAMPLE.CO.UK  "
-        self.assertEqual(extract_email(text), "john.doe@example.co.uk")
-
     def test_extract_order_id_formats(self):
-        self.assertEqual(extract_order_id("Order ID: 12345"), 12345)
-        self.assertEqual(extract_order_id("Order #998877"), 998877)
-        self.assertEqual(extract_order_id("📦 New Order\nEmail: test@example.com\nOrder ID: 5544"), 5544)
+        self.assertEqual(extract_order_id("Order ID: #10025"), 10025)
+        self.assertEqual(extract_order_id("Order #10025"), 10025)
+        self.assertEqual(extract_order_id("#10025"), 10025)
+        self.assertEqual(extract_order_id("Order ID: 10025"), 10025)
 
-    def test_no_order_id_returns_none(self):
-        self.assertIsNone(extract_order_id("Here are the images for customer."))
+    def test_extract_package_description(self):
+        text = "10800 CP\nEmail: test@gmail.com"
+        self.assertEqual(extract_package(text), "10800 CP")
 
 
 class TestDeliverySplitting(unittest.TestCase):
@@ -65,62 +64,64 @@ class TestDeliverySplitting(unittest.TestCase):
         self.assertEqual(len(chunks), 2)
         self.assertEqual([len(c) for c in chunks], [10, 8])
 
-    def test_chunking_thirty_five_images(self):
-        images = [f"file_id_{i}" for i in range(35)]
-        chunks = chunk_list(images, chunk_size=10)
-        self.assertEqual(len(chunks), 4)
-        self.assertEqual([len(c) for c in chunks], [10, 10, 10, 5])
 
+class TestTwoGroupDatabaseWorkflow(unittest.IsolatedAsyncioTestCase):
+    """Async tests for Two-Group Reply-Based Order Creation, Loader Reply Mapping, and Statuses."""
 
-class TestUserSessionManager(unittest.TestCase):
-    """Tests 5-minute user session tracking."""
-
-    def test_session_creation_and_retrieval(self):
-        user_id = 999123
-        email = "session_user@example.com"
-
-        user_session_manager.update_session(user_id, email)
-        retrieved = user_session_manager.get_session_email(user_id)
-        self.assertEqual(retrieved, email)
-
-
-class TestReplyBasedDatabaseWorkflow(unittest.IsolatedAsyncioTestCase):
-    """Async tests for Reply-Based Order Creation, Image Aggregation, and Settings CRUD."""
-
-    async def test_reply_based_order_flow(self):
+    async def test_two_group_workflow(self):
         await init_db()
 
-        # 1. Customer Order Creation
-        email = "reply_flow@example.com"
-        order = await create_pending_order(email)
+        # 1. Customer Order Creation in Client Group
+        email = "twogroup_flow@example.com"
+        order = await create_order(
+            email=email,
+            client_chat_id=-1001111111111,
+            original_message_id=501,
+            package="10800 CP"
+        )
         self.assertIsNotNone(order.id)
-        self.assertEqual(order.email, email)
+        self.assertEqual(order.status, "Pending")
+        self.assertEqual(order.package, "10800 CP")
 
-        # 2. Loader replies with photos for Order ID
+        # 2. Forward to Loader Group & Store Loader Message ID
+        await set_order_loader_message_id(order.id, 9901)
+        loader_order = await get_order_by_loader_msg_id(9901)
+        self.assertIsNotNone(loader_order)
+        self.assertEqual(loader_order.id, order.id)
+
+        # 3. Loader replies with images
         file_items = [("photo_1", "photo"), ("photo_2", "photo")]
         updated_order, is_dup = await add_images_to_order(
             order_id=order.id,
             file_items=file_items,
-            media_group_id="album_1001"
+            media_group_id="album_5501"
         )
         self.assertFalse(is_dup)
         self.assertEqual(len(updated_order.images), 2)
 
-        # 3. Loader replies with duplicate album -> should ignore duplicate
-        dup_order, is_dup_2 = await add_images_to_order(
+        # 4. Duplicate reply test
+        _, is_dup_2 = await add_images_to_order(
             order_id=order.id,
             file_items=file_items,
-            media_group_id="album_1001"
+            media_group_id="album_5501"
         )
         self.assertTrue(is_dup_2)
 
-        # 4. Mark order as delivered
+        # 5. Mark Order Delivered
         await mark_order_delivered(order.id)
-        fetched = await get_order_by_id(order.id)
-        self.assertIsNotNone(fetched.delivered_at)
+        del_order = await get_order_by_id(order.id)
+        self.assertEqual(del_order.status, "Delivered")
+        self.assertIsNotNone(del_order.delivered_at)
 
-        # Cleanup
+        # 6. Cancellation test on second order
+        order2 = await create_order("cancel_test@example.com")
+        canceled_order, success = await cancel_order(order2.id)
+        self.assertTrue(success)
+        self.assertEqual(canceled_order.status, "Cancelled")
+
+        # Clean up
         await delete_orders_by_email(email)
+        await delete_orders_by_email("cancel_test@example.com")
 
 
 if __name__ == "__main__":

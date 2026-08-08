@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 from config import Config
-from database import init_db, cleanup_old_records
+from database import init_db, cleanup_old_records, check_order_timeouts
 from utils import setup_logging
 from handlers import (
     source_group_handler,
@@ -23,10 +23,13 @@ from handlers import (
     start_command,
     help_command,
     find_command,
+    order_info_command,
+    cancel_command,
     resend_command,
     delete_command,
     stats_command,
     pending_command,
+    delivered_command,
     export_command,
     backup_command,
     restore_command,
@@ -45,18 +48,23 @@ setup_logging()
 logger = logging.getLogger("main")
 
 
-async def periodic_cleanup_task() -> None:
-    """Background task running every 24 hours to automatically purge old records."""
+async def periodic_maintenance_task() -> None:
+    """Background task running every hour for order timeouts and 24h database retention cleanup."""
     while True:
         try:
-            await asyncio.sleep(86400)  # 24 hours
+            await asyncio.sleep(3600)  # Check every hour
+            # Check order timeouts (pending longer than 24 hours)
+            expired = await check_order_timeouts(timeout_hours=24)
+            if expired > 0:
+                logger.info(f"Periodic check marked {expired} pending order(s) as Expired (⏰ Pending Too Long).")
+
+            # Retention cleanup if configured
             if Config.CLEANUP_DAYS > 0:
-                logger.info("Executing scheduled database retention cleanup...")
                 await cleanup_old_records(Config.CLEANUP_DAYS)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"Error in periodic cleanup task: {e}")
+            logger.error(f"Error in periodic maintenance task: {e}")
 
 
 async def post_init(application: Application) -> None:
@@ -64,13 +72,18 @@ async def post_init(application: Application) -> None:
     logger.info("Initializing database schema...")
     await init_db()
 
+    # Initial order timeout check on startup
+    expired = await check_order_timeouts(timeout_hours=24)
+    if expired > 0:
+        logger.info(f"Startup check marked {expired} pending order(s) as Expired.")
+
     if Config.CLEANUP_DAYS > 0:
         cleaned = await cleanup_old_records(Config.CLEANUP_DAYS)
         if cleaned > 0:
             logger.info(f"Startup retention check purged {cleaned} expired records.")
 
-    # Schedule background cleanup task in active event loop
-    asyncio.create_task(periodic_cleanup_task())
+    # Schedule background maintenance task in active event loop
+    asyncio.create_task(periodic_maintenance_task())
 
     logger.info("Bot initialization complete. Active and listening for updates...")
 
@@ -101,31 +114,34 @@ def main() -> None:
     application.add_handler(CommandHandler("removedelivery", removedelivery_command))
     application.add_handler(CommandHandler("resetgroups", resetgroups_command))
 
-    # Register Core Admin Commands
+    # Register Core & New Admin Commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("delivered", delivered_command))
     application.add_handler(CommandHandler("find", find_command))
+    application.add_handler(CommandHandler("order", order_info_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("resend", resend_command))
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_command))
 
-    # Register Source Group Handler (Photos, Photo Documents, Text/Caption for user sessions)
+    # Register Client Group Handler (Group 1 - Customer Orders containing text/email)
     application.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.IMAGE | filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
+            (filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
             source_group_handler
         ),
         group=1
     )
 
-    # Register Delivery Group Handler (Text or Caption messages containing emails)
+    # Register Loader Group Handler (Group 2 - Loader Photos / Photo Documents replied to orders)
     application.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
+            (filters.PHOTO | filters.Document.IMAGE) & (~filters.COMMAND),
             delivery_group_handler
         ),
         group=2
