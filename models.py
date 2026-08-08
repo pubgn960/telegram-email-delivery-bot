@@ -2,7 +2,7 @@
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
 Defines schemas and indexes for Orders, Images, Settings, AuthorizedUsers, ClientGroups, and Loaders tables
 supporting two-group reply-based workflow, role-based user management, Group Category Routing (v1.2),
-Multi Loader Approval System, and Category A Only Price Workflow (v1.20.0).
+Multi Loader Approval System, and Category A Only Price Workflow with prompt & calculator tracking (v1.22.0).
 """
 
 from datetime import datetime, timezone
@@ -118,7 +118,7 @@ class AuthorizedUser(Base):
 class Order(Base):
     """
     Represents an Order record in the two-group reply-based workflow.
-    Tracks client message, forwarded loader message, loader group ID, status, package details, category ('A'/'B'), price, and stored image file_ids.
+    Tracks client message, forwarded loader message, loader group ID, status, package details, category ('A'/'B'), price, price prompt msg ID, price msg ID, and stored image file_ids.
     """
 
     __tablename__ = "orders"
@@ -133,6 +133,8 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Pending Approval, Pending Payment, Approved, Rejected, Delivered, Cancelled, Expired
     category: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, default="A")  # 'A' or 'B'
     price: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    price_prompt_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    price_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     media_group_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)

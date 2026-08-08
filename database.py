@@ -487,13 +487,32 @@ async def update_order_status(order_id: int, status: str) -> Optional[Order]:
         return res.unique().scalar_one_or_none()
 
 
-async def update_order_price(order_id: int, price_str: str) -> Optional[Order]:
-    """Updates order price by Order ID."""
+async def set_order_price_prompt(order_id: int, prompt_msg_id: int) -> None:
+    """Stores the active price prompt message ID for an Order."""
     async with AsyncSessionLocal() as session:
         stmt = (
             update(Order)
             .where(Order.id == order_id)
-            .values(price=price_str)
+            .values(price_prompt_msg_id=prompt_msg_id)
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+
+async def update_order_price(order_id: int, price_str: str, price_msg_id: Optional[int] = None) -> Optional[Order]:
+    """Updates order price and clears active price prompt message ID."""
+    async with AsyncSessionLocal() as session:
+        values: Dict[str, Any] = {
+            "price": price_str,
+            "price_prompt_msg_id": None
+        }
+        if price_msg_id is not None:
+            values["price_msg_id"] = price_msg_id
+
+        stmt = (
+            update(Order)
+            .where(Order.id == order_id)
+            .values(**values)
         )
         await session.execute(stmt)
         await session.commit()

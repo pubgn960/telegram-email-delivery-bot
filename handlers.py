@@ -6,13 +6,14 @@ Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Messa
 Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
 Group Category Routing System (v1.2: Category A vs Category B with fixed Payment Review Group -1004441603990),
 Multi-Loader Interactive Category B Approval System (/loaderadd, /loaderlist, /loaderremove, Accept/Reject buttons),
-Category A Only Price Workflow in Client Group (💰 Price inline button, new message '💰 Price: 2500' for calculator bot),
+Category A Only Price Workflow in Client Group (Single Active Prompt, Strict Reply-Based Entry, Validation, '💰 Price: 15.5' / '💰 Price Updated: 30' new calculator messages),
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE for zero-database-query filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT], [LOADER_MGMT], [PRICE]).
 """
 
 import io
+import re
 import os
 import sys
 import html
@@ -44,6 +45,7 @@ from database import (
     remove_client_group_category,
     get_client_group_category,
     update_order_status,
+    set_order_price_prompt,
     update_order_price,
     remove_source_group,
     remove_delivery_group,
@@ -89,8 +91,13 @@ logger = logging.getLogger(__name__)
 # Temporary memory state for interactive /loaderadd step-by-step wizard (user_id -> session dict)
 LOADER_ADD_SESSION: Dict[int, Dict[str, Any]] = {}
 
-# Temporary memory state for interactive price input workflow (user_id -> session dict)
+# Temporary memory state for interactive price input workflow (order_id -> session dict)
 PRICE_INPUT_SESSION: Dict[int, Dict[str, Any]] = {}
+
+
+def is_valid_price_string(text: str) -> bool:
+    """Validates price string: exact numeric integers or decimals only (e.g. 15, 15.5, 2500, 2999.99)."""
+    return bool(re.match(r'^\d+(\.\d+)?$', text.strip()))
 
 
 # ==========================================
@@ -459,13 +466,11 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
 
 async def price_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles '💰 Price' inline button callback in Client Group for Category A orders.
-    Restricted strictly to authorized admins in Client Group.
-    Uses order.client_chat_id and order.original_message_id (NEVER loader_group_id / loader_message_id).
-    Sends 'Enter order price:' prompt in Client Group.
+    Handles '💰 Price' and '✏️ Edit Price' inline button callbacks in Client Group.
+    Enforces Bug 1 Fix: Single active price prompt per order (prevents duplicate prompt spam).
     """
     query = update.callback_query
-    if not query or not query.data or not query.data.startswith("price_set:"):
+    if not query or not query.data or not query.data.startswith(("price_set:", "price_edit:")):
         return
 
     user = update.effective_user
@@ -476,12 +481,10 @@ async def price_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             pass
         return
 
-    try:
-        await query.answer()
-    except Exception as e:
-        logger.exception(f"[PRICE] Failed to answer callback query: {e}")
+    data = query.data
+    parts = data.split(":")
+    action = parts[0]
 
-    parts = query.data.split(":")
     if len(parts) < 2 or not parts[1].isdigit():
         return
 
@@ -489,137 +492,215 @@ async def price_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     order = await get_order_by_id(order_id)
     if not order or not order.client_chat_id:
         try:
-            await query.message.reply_text("❌ Order not found.")
-        except Exception as e:
-            logger.exception(f"[PRICE] Failed to send error message: {e}")
+            await query.answer("❌ Order not found.", show_alert=True)
+        except Exception:
+            pass
         return
 
-    # Category A requirement check
     category = order.category or CLIENT_GROUPS_CACHE.get(order.client_chat_id, "A")
     if category != "A":
-        logger.warning(f"[PRICE] Price button pressed for non-Category A order #{order_id}. Ignored.")
+        try:
+            await query.answer("⚠️ Price workflow is available only for Category A orders.", show_alert=True)
+        except Exception:
+            pass
         return
 
-    # Store price input session for this admin user strictly for Client Group
-    PRICE_INPUT_SESSION[user.id] = {
-        "order_id": order.id,
-        "chat_id": order.client_chat_id,
-        "original_message_id": order.original_message_id,
-        "created_at": datetime.now(timezone.utc)
-    }
+    # Check Bug 1 Fix - Prevent duplicate prompt spam:
+    active_session = PRICE_INPUT_SESSION.get(order.id)
+    is_waiting = bool(active_session or order.price_prompt_msg_id)
 
-    # Prompt admin inside Client Group using order.client_chat_id & query.message.message_id
-    try:
-        await context.bot.send_message(
-            chat_id=order.client_chat_id,
-            text="Enter order price:",
-            reply_to_message_id=query.message.message_id
-        )
-        logger.info(f"[PRICE] Prompted admin in Client Group {order.client_chat_id} for Order #{order.id} price.")
-    except Exception as e:
-        logger.exception(f"[PRICE] Failed to prompt admin in Client Group: {e}")
+    if action == "price_set":
+        if order.price:
+            # Order already has a price, switch inline button to Edit Price
+            try:
+                await query.message.edit_reply_markup(
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
+                )
+            except Exception:
+                pass
+            try:
+                await query.answer("⚠️ Price is already set. Use 'Edit Price' to update.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if is_waiting:
+            try:
+                await query.answer("⚠️ Please enter the price in the existing reply.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        # Prompt for initial order price
+        try:
+            prompt_msg = await context.bot.send_message(
+                chat_id=order.client_chat_id,
+                text="Enter order price:",
+                reply_to_message_id=query.message.message_id
+            )
+            await set_order_price_prompt(order.id, prompt_msg.message_id)
+            PRICE_INPUT_SESSION[order.id] = {
+                "order_id": order.id,
+                "chat_id": order.client_chat_id,
+                "prompt_msg_id": prompt_msg.message_id,
+                "button_msg_id": query.message.message_id,
+                "is_edit": False,
+                "created_at": datetime.now(timezone.utc)
+            }
+            await query.answer()
+            logger.info(f"[PRICE] Prompted admin for Order #{order.id} price (Prompt Msg ID: {prompt_msg.message_id}).")
+        except Exception as e:
+            logger.exception(f"[PRICE] Failed to send price prompt: {e}")
+
+    elif action == "price_edit":
+        if is_waiting and active_session and active_session.get("is_edit"):
+            try:
+                await query.answer("⚠️ Please enter the price in the existing reply.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        # Reply to previous price message if available, otherwise button message
+        reply_target_id = order.price_msg_id or query.message.message_id
+        try:
+            prompt_msg = await context.bot.send_message(
+                chat_id=order.client_chat_id,
+                text="Enter new price:",
+                reply_to_message_id=reply_target_id
+            )
+            await set_order_price_prompt(order.id, prompt_msg.message_id)
+            PRICE_INPUT_SESSION[order.id] = {
+                "order_id": order.id,
+                "chat_id": order.client_chat_id,
+                "prompt_msg_id": prompt_msg.message_id,
+                "button_msg_id": query.message.message_id,
+                "is_edit": True,
+                "created_at": datetime.now(timezone.utc)
+            }
+            await query.answer()
+            logger.info(f"[PRICE] Prompted admin for Order #{order.id} price edit (Prompt Msg ID: {prompt_msg.message_id}).")
+        except Exception as e:
+            logger.exception(f"[PRICE] Failed to send price edit prompt: {e}")
 
 
 async def price_input_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handles admin text input when setting or editing an order price in Client Group.
-    Saves order.price, posts a NEW message in Client Group ('💰 Price: 2500'),
-    and supports price edits by posting a NEW message ('💰 Price: 3000') so the calculator bot reads it.
-    Does NOT edit existing messages.
+    Handles admin text input for Category A Price setting and editing in Client Group.
+    Enforces Bug 2 Fix: Entry MUST be a reply to the bot's prompt message ('Enter order price:' or 'Enter new price:').
+    Ignores unreplied text or non-matching replies completely.
     """
     user = update.effective_user
     message = update.effective_message
     chat = update.effective_chat
 
-    if not user or not message:
-        return
-
-    reply_to = message.reply_to_message
-    session = PRICE_INPUT_SESSION.get(user.id)
-
-    # Check if message is a reply to an existing '💰 Price:' message in Client Group by an authorized admin
-    is_price_reply = (
-        is_admin(user.id) and reply_to and reply_to.text and "💰 Price:" in reply_to.text
-    )
-
-    if not session and not is_price_reply:
+    # Rule: Price entry must be sent strictly as a reply
+    if not user or not message or not message.reply_to_message:
         return
 
     if not is_admin(user.id):
-        PRICE_INPUT_SESSION.pop(user.id, None)
+        return
+
+    reply_to = message.reply_to_message
+    reply_msg_id = reply_to.message_id
+
+    # 1. Match reply_to.message_id against active price prompt message ID
+    target_order_id = None
+    session = None
+
+    for oid, sess in list(PRICE_INPUT_SESSION.items()):
+        if sess.get("prompt_msg_id") == reply_msg_id:
+            target_order_id = oid
+            session = sess
+            break
+
+    # DB fallback check if session lost after bot restart
+    if not target_order_id:
+        async with AsyncSessionLocal() as db_sess:
+            stmt = select(Order).where(Order.price_prompt_msg_id == reply_msg_id)
+            res = await db_sess.execute(stmt)
+            matched_order = res.scalar_one_or_none()
+            if matched_order:
+                target_order_id = matched_order.id
+                session = {
+                    "order_id": matched_order.id,
+                    "chat_id": matched_order.client_chat_id,
+                    "prompt_msg_id": reply_msg_id,
+                    "button_msg_id": None,
+                    "is_edit": bool(matched_order.price)
+                }
+
+    # Rule: If reply_to is NOT a price prompt message, ignore completely
+    if not target_order_id or not session:
         return
 
     text = (message.text or "").strip()
 
+    # Handle cancel command
     if text.startswith("/") or text.lower() in ("cancel", "exit"):
-        PRICE_INPUT_SESSION.pop(user.id, None)
-        if session and text.lower() in ("cancel", "exit"):
+        PRICE_INPUT_SESSION.pop(target_order_id, None)
+        if text.lower() in ("cancel", "exit"):
             await message.reply_text("❌ Price input cancelled.")
         return
 
-    # Extract numeric digits
-    numeric_digits = "".join(filter(str.isdigit, text))
-    if not numeric_digits:
-        if session:
-            await message.reply_text("❌ Invalid price. Please enter numbers only (e.g. 2500).")
+    # Validate price format (e.g. 15, 15.5, 2500, 2999.99; reject abc, 15rs, price 20)
+    if not is_valid_price_string(text):
+        await message.reply_text("❌ Invalid price.\nPlease enter numbers only.")
         return
 
-    order_id = None
-    original_msg_id = None
-    target_chat_id = chat.id
-
-    if session:
-        order_id = session.get("order_id")
-        original_msg_id = session.get("original_message_id")
-        target_chat_id = session.get("chat_id") or chat.id
-    elif is_price_reply:
-        # Reply to previous '💰 Price: 2500' message - lookup latest delivered order in this Client Group
-        async with AsyncSessionLocal() as db_sess:
-            stmt = select(Order).where(
-                Order.client_chat_id == chat.id,
-                Order.status == "Delivered"
-            ).order_by(Order.delivered_at.desc())
-            res = await db_sess.execute(stmt)
-            recent_orders = list(res.scalars().all())
-            if recent_orders:
-                order_id = recent_orders[0].id
-                original_msg_id = recent_orders[0].original_message_id
-
-    if not order_id:
-        PRICE_INPUT_SESSION.pop(user.id, None)
-        return
-
-    order = await get_order_by_id(order_id)
+    order = await get_order_by_id(target_order_id)
     if not order:
-        PRICE_INPUT_SESSION.pop(user.id, None)
-        await message.reply_text(f"❌ Order #{order_id} not found.")
+        PRICE_INPUT_SESSION.pop(target_order_id, None)
+        await message.reply_text(f"❌ Order #{target_order_id} not found.")
         return
 
-    is_update = bool(order.price)
+    is_edit = session.get("is_edit", False) or bool(order.price)
 
-    # 1. Update database: order.price = numeric_digits
-    await update_order_price(order_id, numeric_digits)
+    # 2. Save order.price = text
+    # 3. Post a NEW message in Client Group for calculator bot
+    if is_edit:
+        new_price_text = f"💰 Price Updated: {text}"
+        action_str = "updated to"
+    else:
+        new_price_text = f"💰 Price: {text}"
+        action_str = "set to"
 
-    # 2. Log update as required by spec:
+    reply_target_id = order.original_message_id or reply_msg_id
+
+    try:
+        sent_price_msg = await context.bot.send_message(
+            chat_id=session["chat_id"],
+            text=new_price_text,
+            reply_to_message_id=reply_target_id
+        )
+        logger.info(f"[PRICE] Calculator price message posted in Client Group: '{new_price_text}'")
+
+        # Save order price & price_msg_id in DB
+        await update_order_price(order.id, text, price_msg_id=sent_price_msg.message_id)
+
+    except Exception as e:
+        logger.exception(f"[PRICE] Failed to post price message: {e}")
+        return
+
+    # 4. Change inline button on original button message to ✏️ Edit Price
+    button_msg_id = session.get("button_msg_id")
+    if button_msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=session["chat_id"],
+                message_id=button_msg_id,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
+            )
+        except Exception:
+            pass
+
+    # 5. Output required log format:
     # [PRICE]
     # Order #25
-    # Price set to 2500 (or Price updated to 3000)
-    action_str = "updated to" if is_update else "set to"
-    logger.info(f"[PRICE]\nOrder #{order_id}\nPrice {action_str} {numeric_digits}")
+    # Price set to 15.5 (or Price updated to 30)
+    logger.info(f"[PRICE]\nOrder #{order.id}\nPrice {action_str} {text}")
 
-    # 3. Post a NEW message in Client Group: 💰 Price: 2500 (or 3000)
-    price_msg_text = f"💰 Price: {numeric_digits}"
-    try:
-        await context.bot.send_message(
-            chat_id=target_chat_id,
-            text=price_msg_text,
-            reply_to_message_id=original_msg_id or message.message_id
-        )
-        logger.info(f"[PRICE] Calculator price message posted in Client Group: '{price_msg_text}'")
-    except Exception as e:
-        logger.exception(f"[PRICE] Failed to post price message in Client Group: {e}")
-
-    PRICE_INPUT_SESSION.pop(user.id, None)
+    # Remove active price session
+    PRICE_INPUT_SESSION.pop(target_order_id, None)
 
 
 # ==========================================

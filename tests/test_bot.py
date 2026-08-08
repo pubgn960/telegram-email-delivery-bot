@@ -22,7 +22,7 @@ from delivery import chunk_list
 from media_collector import user_session_manager
 from utils import is_super_admin, is_delivery_user
 from main import validate_bot_command
-from handlers import LOADER_ADD_SESSION
+from handlers import LOADER_ADD_SESSION, is_valid_price_string
 from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
@@ -37,6 +37,7 @@ from database import (
     get_client_group_category,
     update_payment_review_group,
     update_order_status,
+    set_order_price_prompt,
     update_order_price,
     add_authorized_user,
     remove_authorized_user,
@@ -66,7 +67,20 @@ from database import (
 
 
 class TestCategoryAPriceWorkflow(unittest.IsolatedAsyncioTestCase):
-    """Tests Category A Price workflow DB updates."""
+    """Tests Category A Price workflow DB updates and string validation."""
+
+    def test_price_validation(self):
+        # Valid numbers
+        self.assertTrue(is_valid_price_string("15"))
+        self.assertTrue(is_valid_price_string("15.5"))
+        self.assertTrue(is_valid_price_string("2500"))
+        self.assertTrue(is_valid_price_string("2999.99"))
+
+        # Invalid formats
+        self.assertFalse(is_valid_price_string("abc"))
+        self.assertFalse(is_valid_price_string("15rs"))
+        self.assertFalse(is_valid_price_string("price 20"))
+        self.assertFalse(is_valid_price_string("15.5.5"))
 
     async def test_order_price_update(self):
         await init_db()
@@ -76,13 +90,21 @@ class TestCategoryAPriceWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(order.price)
         self.assertEqual(order.category, "A")
 
-        # Set Price
-        updated = await update_order_price(order.id, "2500")
-        self.assertEqual(updated.price, "2500")
+        # Set Prompt
+        await set_order_price_prompt(order.id, 998877)
+        check_prompt = await get_order_by_id(order.id)
+        self.assertEqual(check_prompt.price_prompt_msg_id, 998877)
+
+        # Set Price (should clear prompt ID and set price_msg_id)
+        updated = await update_order_price(order.id, "15.5", price_msg_id=12345)
+        self.assertEqual(updated.price, "15.5")
+        self.assertEqual(updated.price_msg_id, 12345)
+        self.assertIsNone(updated.price_prompt_msg_id)
 
         # Edit Price
-        edited = await update_order_price(order.id, "2800")
-        self.assertEqual(edited.price, "2800")
+        edited = await update_order_price(order.id, "30", price_msg_id=67890)
+        self.assertEqual(edited.price, "30")
+        self.assertEqual(edited.price_msg_id, 67890)
 
         # Clean up
         await delete_orders_by_email(email)

@@ -256,7 +256,10 @@ async def deliver_order_by_id(
     # 5. Category A Only Price Workflow in CLIENT GROUP (client_chat_id & original_message_id)
     order_category = order.category or (CLIENT_GROUPS_CACHE.get(client_chat_id, "A") if client_chat_id else "A")
     if order_category == "A" and client_chat_id:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
+        if order.price:
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
+        else:
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
         try:
             await bot.send_message(
                 chat_id=client_chat_id,
