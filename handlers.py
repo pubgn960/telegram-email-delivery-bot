@@ -5,9 +5,10 @@ Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Deta
 Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
 Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
 Group Category Routing System (v1.2: Category A vs Category B with fixed Payment Review Group -1004441603990),
+Multi-Loader Interactive Category B Approval System (/loaderadd, /loaderlist, /loaderremove, Accept/Reject buttons),
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
-Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE for zero-database-query filtering.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT]).
+Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE for zero-database-query filtering.
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT], [LOADER_MGMT]).
 """
 
 import io
@@ -31,6 +32,7 @@ from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
     CLIENT_GROUPS_CACHE,
+    LOADERS_CACHE,
     AsyncSessionLocal,
     get_current_settings,
     update_source_group,
@@ -60,7 +62,11 @@ from database import (
     init_db,
     add_authorized_user,
     remove_authorized_user,
-    get_all_authorized_users
+    get_all_authorized_users,
+    add_loader,
+    remove_loader_by_id,
+    get_all_loaders,
+    reload_loaders_cache
 )
 from utils import (
     check_admin_permission,
@@ -76,6 +82,9 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
+# Temporary memory state for interactive /loaderadd step-by-step wizard
+LOADER_ADD_SESSION: dict = {}
+
 
 # ==========================================
 # Two-Group Workflow Message Handlers
@@ -88,7 +97,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Ignores messages sent by Super Admins and Delivery Users.
     Routes orders according to Group Category:
     - Category A (Trusted Groups): Directly forwards to Loader Group.
-    - Category B (Payment Required Groups): Routes to Payment Review Group (-1004441603990) for /approve or /reject.
+    - Category B (Payment Required Groups): Routes to Payment Review Group (-1004441603990) for Accept / Reject inline buttons.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -175,13 +184,13 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.warning("Reaction not supported.")
 
     if category == "B":
-        # Category B Workflow: Forward to Payment Review Group (-1004441603990), set status 'Pending Payment'
+        # Category B Workflow: Forward to Payment Review Group (-1004441603990) with Accept / Reject buttons
         order = await create_order(
             email=email,
             client_chat_id=chat.id,
             original_message_id=message.message_id,
             package=package_desc,
-            status="Pending Payment"
+            status="Pending Approval"
         )
 
         payment_group_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
@@ -196,20 +205,27 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     pass
 
+                group_title = chat.title or "Client Group"
                 card_msg = (
-                    f"💳 <b>NEW PAYMENT REVIEW ORDER</b>\n\n"
-                    f"<b>Order ID:</b> #{order.id}\n"
-                    f"<b>Group:</b> {html.escape(chat.title or 'Client Group')}\n"
-                    f"<b>Email:</b> <code>{html.escape(order.email)}</code>\n\n"
-                    f"To approve: <code>/approve {order.id}</code>\n"
-                    f"To reject: <code>/reject {order.id}</code>"
+                    f"🟨 <b>NEW ORDER</b>\n\n"
+                    f"<b>Order ID:</b> #{order.id}\n\n"
+                    f"<b>Email:</b>\n{html.escape(order.email)}\n\n"
+                    f"<b>Group:</b>\n{html.escape(group_title)}\n\n"
+                    f"Choose an action."
                 )
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Accept", callback_data=f"catb_accept:{order.id}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"catb_reject:{order.id}")
+                    ]
+                ])
                 await context.bot.send_message(
                     chat_id=payment_group_id,
                     text=card_msg,
+                    reply_markup=keyboard,
                     parse_mode="HTML"
                 )
-                logger.info(f"[PAYMENT] Order #{order.id} routed to Payment Review Group.")
+                logger.info(f"[PAYMENT] Order #{order.id} routed to Payment Review Group (-1004441603990).")
             except Exception as e:
                 logger.error(f"[PAYMENT] Failed to route Order #{order.id} to Payment Review Group: {e}")
         else:
@@ -241,7 +257,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         text=text_content
                     )
 
-                await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+                await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
                 logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
                 logger.info("[DETECTOR] Order forwarded.")
             except Exception as e:
@@ -333,7 +349,7 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
                         text=f"Order #{order.id} | Email: {order.email}"
                     )
 
-                await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+                await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
                 logger.info(f"[CLIENT] Duplicate Order #{order.id} confirmed and copied to Loader Group {loader_group_id}")
             except Exception as e:
                 logger.error(f"[CLIENT] Failed to post duplicate Order #{order.id} to Loader Group: {e}")
@@ -364,10 +380,174 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
             pass
 
 
+# ==========================================
+# Multi-Loader Category B Callback Handler
+# ==========================================
+
+async def category_b_approval_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles Multi-Loader Category B Inline Button Callbacks:
+    - catb_reject:<order_id>
+    - catb_accept:<order_id>
+    - catb_select_loader:<order_id>:<loader_id>
+    - catb_cancel:<order_id>
+    """
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("catb_"):
+        return
+
+    await query.answer()
+    data = query.data
+
+    parts = data.split(":")
+    action = parts[0]
+
+    if action == "catb_reject":
+        if len(parts) < 2 or not parts[1].isdigit():
+            return
+        order_id = int(parts[1])
+
+        await update_order_status(order_id, "Rejected")
+        logger.info(f"[PAYMENT] Order #{order_id} rejected via button.")
+
+        card_text = (
+            f"❌ <b>Order Rejected</b>\n\n"
+            f"<b>Order ID:</b> #{order_id}"
+        )
+        try:
+            await query.edit_message_text(card_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    elif action == "catb_accept":
+        if len(parts) < 2 or not parts[1].isdigit():
+            return
+        order_id = int(parts[1])
+
+        # Generate dynamic loader buttons from LOADERS_CACHE / DB
+        loaders = list(LOADERS_CACHE.values())
+        if not loaders:
+            loaders = await get_all_loaders()
+
+        buttons = []
+        if not loaders and BOT_SETTINGS["delivery_group_id"]:
+            # Fallback to primary loader if no custom loaders created
+            buttons.append([InlineKeyboardButton("📦 Primary Loader", callback_data=f"catb_select_loader:{order_id}:primary")])
+        else:
+            for l in loaders:
+                l_id = l["id"] if isinstance(l, dict) else l.id
+                l_name = l["name"] if isinstance(l, dict) else l.loader_name
+                buttons.append([InlineKeyboardButton(f"📦 {l_name}", callback_data=f"catb_select_loader:{order_id}:{l_id}")])
+
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"catb_cancel:{order_id}")])
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        select_text = (
+            f"Select Loader\n\n"
+            f"<b>Order ID:</b> #{order_id}"
+        )
+        try:
+            await query.edit_message_text(select_text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
+
+    elif action == "catb_select_loader":
+        if len(parts) < 3 or not parts[1].isdigit():
+            return
+        order_id = int(parts[1])
+        loader_key = parts[2]
+
+        order = await get_order_by_id(order_id)
+        if not order:
+            try:
+                await query.edit_message_text(f"❌ Order #{order_id} not found.")
+            except Exception:
+                pass
+            return
+
+        target_group_id = None
+        loader_name = "Loader Group"
+
+        if loader_key == "primary":
+            target_group_id = BOT_SETTINGS["delivery_group_id"]
+            loader_name = BOT_SETTINGS["delivery_group_title"] or "Primary Loader"
+        elif loader_key.isdigit():
+            lid = int(loader_key)
+            if lid in LOADERS_CACHE:
+                target_group_id = LOADERS_CACHE[lid]["group_id"]
+                loader_name = LOADERS_CACHE[lid]["name"]
+
+        if not target_group_id:
+            try:
+                await query.edit_message_text(f"❌ Loader Group for ID '{loader_key}' not found.")
+            except Exception:
+                pass
+            return
+
+        # Copy original customer message to selected Loader Group
+        if order.client_chat_id and order.original_message_id:
+            try:
+                try:
+                    forwarded_msg = await context.bot.copy_message(
+                        chat_id=target_group_id,
+                        from_chat_id=order.client_chat_id,
+                        message_id=order.original_message_id
+                    )
+                except Exception:
+                    forwarded_msg = await context.bot.send_message(
+                        chat_id=target_group_id,
+                        text=f"Order #{order.id} | Email: {order.email}"
+                    )
+
+                await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=target_group_id)
+                await update_order_status(order.id, "Pending")
+                logger.info(f"[PAYMENT] Order #{order.id} approved and sent to Loader Group '{loader_name}' ({target_group_id}).")
+            except Exception as e:
+                logger.error(f"[PAYMENT] Failed to copy Order #{order.id} to Loader Group {target_group_id}: {e}")
+
+        success_text = (
+            f"✅ <b>Order Approved & Sent</b>\n\n"
+            f"<b>Order ID:</b> #{order.id}\n"
+            f"<b>Assigned Loader:</b> {html.escape(loader_name)}"
+        )
+        try:
+            await query.edit_message_text(success_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    elif action == "catb_cancel":
+        if len(parts) < 2 or not parts[1].isdigit():
+            return
+        order_id = int(parts[1])
+        order = await get_order_by_id(order_id)
+
+        if not order:
+            return
+
+        # Revert message back to initial Accept / Reject buttons
+        card_msg = (
+            f"🟨 <b>NEW ORDER</b>\n\n"
+            f"<b>Order ID:</b> #{order.id}\n\n"
+            f"<b>Email:</b>\n{html.escape(order.email)}\n\n"
+            f"<b>Group:</b>\nClient Group\n\n"
+            f"Choose an action."
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Accept", callback_data=f"catb_accept:{order.id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"catb_reject:{order.id}")
+            ]
+        ])
+        try:
+            await query.edit_message_text(card_msg, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Monitors messages in Group 2 (Loader Group).
-    Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
+    Monitors messages in Loader Groups.
+    Validates group ID strictly using in-memory BOT_SETTINGS and LOADERS_CACHE without querying database.
     Enforces Role-Based Permission Check (User must have 'delivery' or 'admin' role).
     Validates that incoming text or media is sent strictly as a reply to a valid bot Order Message.
     Ignores non-reply messages and unmatched replies silently without sending error cards in chat.
@@ -380,22 +560,19 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not message or not chat:
         return
 
-    # Check against in-memory BOT_SETTINGS cache (Zero DB SELECT query)
-    configured_loader_id = BOT_SETTINGS["delivery_group_id"]
+    # Check against in-memory BOT_SETTINGS and LOADERS_CACHE (Zero DB SELECT query)
+    is_known_loader = (chat.id == BOT_SETTINGS["delivery_group_id"]) or any(
+        l["group_id"] == chat.id for l in LOADERS_CACHE.values()
+    )
 
-    if not configured_loader_id:
-        logger.warning(f"[LOADER] Loader Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
-        return
-
-    # Must match configured Loader Group
-    if chat.id != configured_loader_id:
-        logger.debug(f"[LOADER] Ignored message in chat {chat.id} ({chat.title}); configured Loader Group ID is {configured_loader_id}.")
+    if not is_known_loader:
+        logger.debug(f"[LOADER] Ignored message in unconfigured chat {chat.id} ({chat.title}).")
         return
 
     # Role-Based Permission Check for Delivery Users
     user_id = user.id if user else None
     if not is_delivery_user(user_id):
-        logger.warning(f"[LOADER] Unauthorized user {user_id} attempted to deliver order in Loader Group.")
+        logger.warning(f"[LOADER] Unauthorized user {user_id} attempted to deliver order in Loader Group {chat.id}.")
         try:
             await message.reply_text("⛔ You are not authorized to deliver orders.")
         except Exception as e:
@@ -500,6 +677,106 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         bot=context.bot,
         caption_text=text_content
     )
+
+
+# ==========================================
+# Multi-Loader Management Commands
+# ==========================================
+
+async def loaderadd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles /loaderadd command. Supports direct arguments (/loaderadd <group_id> <name>)
+    or step-by-step interactive wizard (/loaderadd -> Ask Group ID -> Ask Loader Name).
+    """
+    if not await check_admin_permission(update):
+        return
+
+    user = update.effective_user
+    uid = user.id if user else None
+    args = context.args or []
+
+    if len(args) >= 2 and args[0].lstrip("-").isdigit():
+        group_id = int(args[0])
+        loader_name = " ".join(args[1:])
+        await add_loader(group_id, loader_name)
+        await update.effective_message.reply_text("✅ Loader Added Successfully")
+        return
+
+    # Interactive Step-by-Step wizard
+    LOADER_ADD_SESSION[uid] = {"step": 1}
+    await update.effective_message.reply_text("Send Loader Group ID")
+
+
+async def loader_text_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles text input during interactive /loaderadd step-by-step wizard."""
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or user.id not in LOADER_ADD_SESSION:
+        return
+
+    session = LOADER_ADD_SESSION[user.id]
+    step = session.get("step", 1)
+    text = (message.text or "").strip()
+
+    if step == 1:
+        if not text.lstrip("-").isdigit():
+            await message.reply_text("❌ Invalid Loader Group ID. Must be numeric (e.g. -1001234567890).")
+            return
+
+        session["group_id"] = int(text)
+        session["step"] = 2
+        await message.reply_text("Send Loader Name")
+        return
+
+    elif step == 2:
+        group_id = session.get("group_id")
+        loader_name = text
+
+        if not group_id or not loader_name:
+            await message.reply_text("❌ Error adding loader. Please try again with /loaderadd.")
+            LOADER_ADD_SESSION.pop(user.id, None)
+            return
+
+        await add_loader(group_id, loader_name)
+        LOADER_ADD_SESSION.pop(user.id, None)
+        await message.reply_text("✅ Loader Added Successfully")
+        return
+
+
+async def loaderlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /loaderlist command showing all registered loaders."""
+    if not await check_admin_permission(update):
+        return
+
+    loaders = await get_all_loaders()
+    if not loaders:
+        await update.effective_message.reply_text("Registered Loaders\n\nNone")
+        return
+
+    lines = ["Registered Loaders\n"]
+    for idx, l in enumerate(loaders, 1):
+        lines.append(f"{idx}.\n{l.loader_name}\n{l.group_id}\n")
+
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def loaderremove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /loaderremove <id> command."""
+    if not await check_admin_permission(update):
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("⚠️ Usage: <code>/loaderremove 2</code>", parse_mode="HTML")
+        return
+
+    loader_id = int(context.args[0])
+    removed = await remove_loader_by_id(loader_id)
+
+    if removed:
+        await update.effective_message.reply_text("✅ Loader Removed")
+    else:
+        await update.effective_message.reply_text(f"❌ Loader ID #{loader_id} not found.")
 
 
 # ==========================================
@@ -634,7 +911,7 @@ async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TY
                     text=f"Order #{order.id} | Email: {order.email}"
                 )
 
-            await set_order_loader_message_id(order.id, forwarded_msg.message_id)
+            await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
             logger.info(f"[PAYMENT] Order #{order.id} approved. Forwarded to Loader Group.")
         except Exception as e:
             logger.error(f"[PAYMENT] Failed to forward approved Order #{order.id} to Loader Group: {e}")
@@ -999,7 +1276,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         created_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
         delivered_str = order.delivered_at.strftime("%Y-%m-%d %H:%M UTC") if order.delivered_at else "N/A"
         email_escaped = html.escape(order.email)
-        status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Payment") else "❌")
+        status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Approval", "Pending Payment") else "❌")
         details.append(
             f"{idx}. {status_icon} Order <code>#{order.id}</code> | Status: <b>{order.status}</b>\n"
             f"    Email: <code>{email_escaped}</code> | Images: <b>{len(order.images)}</b>\n"
@@ -1030,7 +1307,7 @@ async def order_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     email_escaped = html.escape(order.email)
     pkg_escaped = html.escape(order.package or "Standard Package")
 
-    status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Payment") else "❌")
+    status_icon = "✅" if order.status == "Delivered" else ("⏳" if order.status in ("Pending", "Pending Approval", "Pending Payment") else "❌")
 
     msg = (
         f"📦 <b>Order Detailed Information</b>\n\n"
@@ -1040,6 +1317,7 @@ async def order_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"<b>Package:</b> <i>{pkg_escaped}</i>\n"
         f"<b>Stored Images:</b> {len(order.images)}\n"
         f"<b>Client Chat ID:</b> <code>{order.client_chat_id or 'N/A'}</code>\n"
+        f"<b>Loader Group ID:</b> <code>{order.loader_group_id or 'N/A'}</code>\n"
         f"<b>Loader Msg ID:</b> <code>{order.loader_message_id or 'N/A'}</code>\n"
         f"<b>Created Time:</b> <code>{created_str}</code>\n"
         f"<b>Delivered Time:</b> <code>{delivered_str}</code>"
@@ -1276,6 +1554,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• <code>/resetgroups</code> - Reset all group settings\n"
         "• <code>/status</code> - Display bot status\n"
         "• <code>/setup</code> - View setup guide\n\n"
+        "<b>Multi Loader Management:</b>\n"
+        "• <code>/loaderadd</code> - Add a new Loader Group\n"
+        "• <code>/loaderlist</code> - List all registered Loaders\n"
+        "• <code>/loaderremove &lt;id&gt;</code> - Delete a Loader\n\n"
         "<b>Payment Review Workflow:</b>\n"
         "• <code>/approve &lt;id&gt;</code> - Approve Category B order & forward to Loader\n"
         "• <code>/reject &lt;id&gt;</code> - Reject Category B order\n\n"

@@ -1,7 +1,7 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
 Initializes database, configures handlers, sets Telegram '/' UI command menu,
-populates global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE on startup,
+populates global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE on startup,
 starts background tasks, and runs bot polling.
 """
 
@@ -19,13 +19,14 @@ from telegram.ext import (
 )
 
 from config import Config
-from database import init_db, cleanup_old_records, check_order_timeouts, reload_bot_settings_cache, reload_auth_users_cache
+from database import init_db, cleanup_old_records, check_order_timeouts, reload_bot_settings_cache, reload_auth_users_cache, reload_loaders_cache
 from utils import setup_logging
 from handlers import (
     source_group_handler,
     edited_message_handler,
     delivery_group_handler,
     duplicate_order_callback_handler,
+    category_b_approval_callback_handler,
     category_a_command,
     category_b_command,
     category_check_command,
@@ -33,6 +34,10 @@ from handlers import (
     paymentgroup_command,
     approve_order_command,
     reject_order_command,
+    loaderadd_command,
+    loaderlist_command,
+    loaderremove_command,
+    loader_text_wizard_handler,
     user_command,
     users_command,
     start_command,
@@ -87,9 +92,10 @@ async def post_init(application: Application) -> None:
     logger.info("Initializing database schema...")
     await init_db()
 
-    # Load Settings, Authorized Users, and Client Groups from DB once on startup into RAM
+    # Load Settings, Authorized Users, Client Groups, and Loaders from DB once on startup into RAM
     await reload_bot_settings_cache()
     await reload_auth_users_cache()
+    await reload_loaders_cache()
 
     # Register Bot Commands list so Telegram displays them in the interactive '/' popup menu
     commands = [
@@ -100,6 +106,9 @@ async def post_init(application: Application) -> None:
         BotCommand("B", "Set Client Group to Category B (Payment Review)"),
         BotCommand("category", "View current group category"),
         BotCommand("removecategory", "Remove group category"),
+        BotCommand("loaderadd", "Add a new Loader Group"),
+        BotCommand("loaderlist", "List all registered Loaders"),
+        BotCommand("loaderremove", "Remove a registered Loader"),
         BotCommand("approve", "Approve Category B order"),
         BotCommand("reject", "Reject Category B order"),
         BotCommand("groups", "Show group configuration status"),
@@ -174,6 +183,11 @@ def main() -> None:
     application.add_handler(CommandHandler("removedelivery", removedelivery_command))
     application.add_handler(CommandHandler("resetgroups", resetgroups_command))
 
+    # Register Multi-Loader Commands
+    application.add_handler(CommandHandler("loaderadd", loaderadd_command))
+    application.add_handler(CommandHandler("loaderlist", loaderlist_command))
+    application.add_handler(CommandHandler("loaderremove", loaderremove_command))
+
     # Register User Management Commands
     application.add_handler(CommandHandler("user", user_command))
     application.add_handler(CommandHandler("users", users_command))
@@ -193,8 +207,18 @@ def main() -> None:
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_command))
 
-    # Register Duplicate Order Callback Query Handler
+    # Register Interactive Callback Query Handlers
     application.add_handler(CallbackQueryHandler(duplicate_order_callback_handler, pattern="^dup_"))
+    application.add_handler(CallbackQueryHandler(category_b_approval_callback_handler, pattern="^catb_"))
+
+    # Register loader_text_wizard_handler for interactive /loaderadd step wizard
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & (~filters.COMMAND),
+            loader_text_wizard_handler
+        ),
+        group=0
+    )
 
     # Register Client Group Handler (Group 1 - Customer Orders)
     application.add_handler(

@@ -1,7 +1,7 @@
 """
 SQLAlchemy 2 Async declarative models for Telegram Email Image Delivery Bot.
-Defines schemas and indexes for Orders, Images, Settings, AuthorizedUsers, and ClientGroups tables
-supporting two-group reply-based workflow, role-based user management, and Group Category Routing (v1.2).
+Defines schemas and indexes for Orders, Images, Settings, AuthorizedUsers, ClientGroups, and Loaders tables
+supporting two-group reply-based workflow, role-based user management, Group Category Routing (v1.2), and Multi Loader Approval System.
 """
 
 from datetime import datetime, timezone
@@ -73,6 +73,26 @@ class ClientGroup(Base):
         return f"<ClientGroup(chat_id={self.chat_id}, category='{self.category}')>"
 
 
+class Loader(Base):
+    """
+    Stores Loader Groups for Multi-Loader Category B approval system.
+    """
+
+    __tablename__ = "loaders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    loader_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    group_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<Loader(id={self.id}, name='{self.loader_name}', group_id={self.group_id})>"
+
+
 class AuthorizedUser(Base):
     """
     Stores authorized users and their roles for permission enforcement.
@@ -97,7 +117,7 @@ class AuthorizedUser(Base):
 class Order(Base):
     """
     Represents an Order record in the two-group reply-based workflow.
-    Tracks client message, forwarded loader message, status, package details, and stored image file_ids.
+    Tracks client message, forwarded loader message, loader group ID, status, package details, and stored image file_ids.
     """
 
     __tablename__ = "orders"
@@ -107,8 +127,9 @@ class Order(Base):
     package: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     client_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     original_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    loader_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     loader_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Pending Payment, Approved, Rejected, Delivered, Cancelled, Expired
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="Pending", index=True)  # Pending, Pending Approval, Pending Payment, Approved, Rejected, Delivered, Cancelled, Expired
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     media_group_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)

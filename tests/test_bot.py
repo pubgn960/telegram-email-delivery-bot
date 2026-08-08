@@ -5,6 +5,7 @@ wrong details workflow, duplicate pending order detection, album splitting, SHA2
 BOT_SETTINGS cache, Role-Based User Management (AUTH_USERS_CACHE, Super Admin, Delivery Users),
 Ignoring Super Admin & Delivery User messages in Client Group,
 Group Category Routing System (v1.2: Category A, Category B, Payment Review, Approve, Reject),
+Multi-Loader Approval System (Loader CRUD, LOADERS_CACHE, Multi-Loader Assignment),
 and two-group reply-based DB operations.
 """
 
@@ -19,9 +20,11 @@ from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
     CLIENT_GROUPS_CACHE,
+    LOADERS_CACHE,
     init_db,
     reload_bot_settings_cache,
     reload_auth_users_cache,
+    reload_loaders_cache,
     set_client_group_category,
     remove_client_group_category,
     get_client_group_category,
@@ -30,6 +33,9 @@ from database import (
     add_authorized_user,
     remove_authorized_user,
     get_all_authorized_users,
+    add_loader,
+    remove_loader_by_id,
+    get_all_loaders,
     create_order,
     set_order_loader_message_id,
     get_order_by_id,
@@ -49,6 +55,37 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestMultiLoaderManagement(unittest.IsolatedAsyncioTestCase):
+    """Tests Loader CRUD operations, cache synchronization, and multi-loader assignment."""
+
+    async def test_loader_crud_and_cache(self):
+        await init_db()
+
+        # Add Loader 1
+        l1 = await add_loader(-1001234567890, "Pakistan Loader")
+        self.assertIsNotNone(l1.id)
+
+        # Add Loader 2
+        l2 = await add_loader(-1009876543210, "India Loader")
+        self.assertIsNotNone(l2.id)
+
+        # Check cache
+        self.assertIn(l1.id, LOADERS_CACHE)
+        self.assertEqual(LOADERS_CACHE[l1.id]["name"], "Pakistan Loader")
+
+        # List Loaders
+        loaders = await get_all_loaders()
+        self.assertTrue(len(loaders) >= 2)
+
+        # Remove Loader
+        removed = await remove_loader_by_id(l1.id)
+        self.assertTrue(removed)
+        self.assertNotIn(l1.id, LOADERS_CACHE)
+
+        # Clean up
+        await remove_loader_by_id(l2.id)
 
 
 class TestGroupCategoryRouting(unittest.IsolatedAsyncioTestCase):

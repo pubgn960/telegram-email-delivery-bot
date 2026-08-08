@@ -1,8 +1,8 @@
 """
 Database manager providing asynchronous SQLAlchemy 2.0 session management, CRUD operations,
 Order tracking for two-group reply-based workflow, SHA256 fingerprint deduplication, CSV export,
-backup/restore, and detailed statistics dashboard.
-Includes global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE for high-performance zero-query filtering.
+backup/restore, detailed statistics dashboard, and Multi-Loader Category B management.
+Includes global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE for high-performance zero-query filtering.
 """
 
 import os
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import joinedload
 
 from config import Config
-from models import Base, Order, Image, Settings, AuthorizedUser, ClientGroup
+from models import Base, Order, Image, Settings, AuthorizedUser, ClientGroup, Loader
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,9 @@ AUTH_USERS_CACHE: Dict[int, str] = {}
 # Global in-memory client group category cache: chat_id -> category ('A' or 'B')
 CLIENT_GROUPS_CACHE: Dict[int, str] = {}
 
+# Global in-memory loaders cache: loader_id -> {"id": ..., "name": ..., "group_id": ...}
+LOADERS_CACHE: Dict[int, Dict[str, Any]] = {}
+
 
 async def dispose_engine() -> None:
     """Disposes active database engine connection pool."""
@@ -73,7 +76,7 @@ def compute_fingerprint(email: str, file_ids: List[str]) -> str:
 
 
 async def init_db() -> None:
-    """Initializes database schema and default Settings, AuthorizedUsers, and ClientGroups records."""
+    """Initializes database schema and default Settings, AuthorizedUsers, ClientGroups, and Loaders records."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -82,6 +85,7 @@ async def init_db() -> None:
     await get_or_create_settings()
     await reload_auth_users_cache()
     await reload_bot_settings_cache()
+    await reload_loaders_cache()
 
 
 # ==========================================
@@ -326,6 +330,74 @@ async def reset_groups() -> Settings:
 
 
 # ==========================================
+# Multi-Loader Operations & Cache
+# ==========================================
+
+async def reload_loaders_cache() -> Dict[int, Dict[str, Any]]:
+    """Loads all registered loaders from DB into LOADERS_CACHE in RAM."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Loader).order_by(Loader.id)
+        res = await session.execute(stmt)
+        loaders = list(res.scalars().all())
+
+        LOADERS_CACHE.clear()
+        for l in loaders:
+            LOADERS_CACHE[l.id] = {
+                "id": l.id,
+                "name": l.loader_name,
+                "group_id": l.group_id
+            }
+
+    logger.info(f"[CACHE] Loaded {len(LOADERS_CACHE)} Loader(s) into memory.")
+    return LOADERS_CACHE
+
+
+async def add_loader(group_id: int, loader_name: str) -> Loader:
+    """Adds or updates a Loader in DB and refreshes LOADERS_CACHE."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Loader).where(Loader.group_id == group_id)
+        res = await session.execute(stmt)
+        loader = res.scalar_one_or_none()
+
+        if not loader:
+            loader = Loader(
+                loader_name=loader_name,
+                group_id=group_id,
+                created_at=datetime.now(timezone.utc)
+            )
+            session.add(loader)
+        else:
+            loader.loader_name = loader_name
+
+        await session.commit()
+
+    await reload_loaders_cache()
+    logger.info(f"[LOADER_MGMT] Added loader '{loader_name}' with Group ID {group_id}.")
+    return loader
+
+
+async def remove_loader_by_id(loader_id: int) -> bool:
+    """Removes a Loader by ID from DB and refreshes LOADERS_CACHE."""
+    async with AsyncSessionLocal() as session:
+        stmt = delete(Loader).where(Loader.id == loader_id)
+        res = await session.execute(stmt)
+        await session.commit()
+        count = res.rowcount
+
+    await reload_loaders_cache()
+    logger.info(f"[LOADER_MGMT] Removed loader ID {loader_id}.")
+    return count > 0
+
+
+async def get_all_loaders() -> List[Loader]:
+    """Retrieves all registered loaders from database."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Loader).order_by(Loader.id)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+
+# ==========================================
 # Client Group Category Routing Operations
 # ==========================================
 
@@ -538,6 +610,7 @@ async def create_order(
             package=package,
             client_chat_id=client_chat_id,
             original_message_id=original_message_id,
+            loader_group_id=None,
             loader_message_id=None,
             status=status,
             image_count=0,
@@ -553,17 +626,21 @@ async def create_order(
         return new_order
 
 
-async def set_order_loader_message_id(order_id: int, loader_message_id: int) -> None:
-    """Updates the forwarded loader message ID for an order."""
+async def set_order_loader_message_id(order_id: int, loader_message_id: int, loader_group_id: Optional[int] = None) -> None:
+    """Updates the forwarded loader message ID and optional loader group ID for an order."""
     async with AsyncSessionLocal() as session:
+        values: Dict[str, Any] = {"loader_message_id": loader_message_id}
+        if loader_group_id is not None:
+            values["loader_group_id"] = loader_group_id
+
         stmt = (
             update(Order)
             .where(Order.id == order_id)
-            .values(loader_message_id=loader_message_id)
+            .values(**values)
         )
         await session.execute(stmt)
         await session.commit()
-        logger.info(f"Forwarded Order | Order ID: #{order_id} -> Loader Msg ID: {loader_message_id}")
+        logger.info(f"Forwarded Order | Order ID: #{order_id} -> Loader Msg ID: {loader_message_id} (Loader Group: {loader_group_id})")
 
 
 async def get_order_by_id(order_id: int) -> Optional[Order]:
@@ -585,7 +662,7 @@ async def get_pending_order_by_email(email: str) -> Optional[Order]:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.email == email_clean, Order.status.in_(["Pending", "Pending Payment"]))
+            .where(Order.email == email_clean, Order.status.in_(["Pending", "Pending Approval", "Pending Payment"]))
             .order_by(Order.created_at.desc())
         )
         res = await session.execute(stmt)
@@ -718,12 +795,12 @@ async def cancel_order(order_id: int) -> Tuple[Optional[Order], bool]:
 
 
 async def get_pending_orders() -> List[Order]:
-    """Retrieves all orders in Pending or Pending Payment status."""
+    """Retrieves all orders in Pending, Pending Approval, or Pending Payment status."""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Order)
             .options(joinedload(Order.images))
-            .where(Order.status.in_(["Pending", "Pending Payment"]))
+            .where(Order.status.in_(["Pending", "Pending Approval", "Pending Payment"]))
             .order_by(Order.created_at.desc())
         )
         result = await session.execute(stmt)
@@ -786,7 +863,7 @@ async def check_order_timeouts(timeout_hours: int = 24) -> int:
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
     async with AsyncSessionLocal() as session:
-        stmt = select(Order).where(Order.status.in_(["Pending", "Pending Payment"]), Order.created_at < cutoff)
+        stmt = select(Order).where(Order.status.in_(["Pending", "Pending Approval", "Pending Payment"]), Order.created_at < cutoff)
         res = await session.execute(stmt)
         expired_orders = list(res.scalars().all())
 
@@ -812,7 +889,7 @@ async def get_detailed_stats() -> Dict[str, Any]:
     """Computes comprehensive statistics for the bot dashboard."""
     async with AsyncSessionLocal() as session:
         total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
-        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.status.in_(["Pending", "Pending Payment"])))).scalar() or 0
+        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.status.in_(["Pending", "Pending Approval", "Pending Payment"])))).scalar() or 0
         delivered_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Delivered"))).scalar() or 0
         cancelled_orders = (await session.execute(select(func.count(Order.id)).where(Order.status == "Cancelled"))).scalar() or 0
 
