@@ -156,10 +156,10 @@ def main() -> None:
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_command))
 
-    # Register Client Group Handler (Group 1 - Customer Orders containing text/email)
+    # Register Client Group Handler (Group 1 - Customer Orders)
     application.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
+            (filters.TEXT | filters.CAPTION | filters.PHOTO) & (~filters.COMMAND),
             source_group_handler
         ),
         group=1
@@ -168,7 +168,7 @@ def main() -> None:
     # Register Loader Group Handler (Group 2 - Loader Photos / Photo Documents replied to orders)
     application.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.IMAGE) & (~filters.COMMAND),
+            (filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
             delivery_group_handler
         ),
         group=2

@@ -2,6 +2,7 @@
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (No Customer Names exposed),
 Telegram Reaction handling (📥 order received, ❤️ delivery completed), and Admin Commands.
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION]).
 """
 
 import io
@@ -75,19 +76,26 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     settings = await get_current_settings()
     configured_client_id = settings.source_group_id
 
+    if not configured_client_id:
+        logger.warning(f"[CLIENT] Client Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
+        return
+
     # Must match configured Client Group
-    if not configured_client_id or chat.id != configured_client_id:
+    if chat.id != configured_client_id:
+        logger.debug(f"[CLIENT] Ignored message in chat {chat.id} ({chat.title}); configured Client Group ID is {configured_client_id}.")
         return
 
     text_content = message.text or message.caption or ""
     if not text_content:
+        logger.debug(f"[CLIENT] Message {message.message_id} in Client Group has no text/caption content.")
         return
 
     email = extract_email(text_content)
     if not email:
+        logger.debug(f"[CLIENT] Message {message.message_id} in Client Group does not contain a valid email address.")
         return
 
-    logger.info(f"Order Received | Email detected: '{email}' in Client Group {chat.id}")
+    logger.info(f"[CLIENT] New order detected for email '{email}' in Client Group {chat.id} (Msg ID: {message.message_id})")
 
     # Extract package description (NO customer name / username / user_id!)
     package_desc = extract_package(text_content)
@@ -123,9 +131,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="HTML"
             )
             await set_order_loader_message_id(order.id, forwarded_msg.message_id)
-            logger.info(f"Order Forwarded | Order ID: #{order.id} -> Loader Group ({loader_group_id})")
+            logger.info(f"[CLIENT] Order forwarded to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
         except Exception as e:
-            logger.error(f"Failed to post Order #{order.id} to Loader Group: {e}")
+            logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
+    else:
+        logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
 
     # 4. Add 📥 (fallback ✅) reaction to ORIGINAL customer order message
     reacted = await safe_set_message_reaction(
@@ -136,7 +146,9 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         fallback_emoji="✅"
     )
     if reacted:
-        logger.info(f"Reaction Added | 📥 reaction placed on original customer Order #{order.id}")
+        logger.info(f"[REACTION] Client reaction added ('📥') to customer Order #{order.id} (Msg ID: {message.message_id})")
+    else:
+        logger.warning(f"[REACTION] Failed to add client reaction to Order #{order.id} (Msg ID: {message.message_id})")
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -154,8 +166,13 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     settings = await get_current_settings()
     configured_loader_id = settings.delivery_group_id
 
+    if not configured_loader_id:
+        logger.warning(f"[LOADER] Loader Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
+        return
+
     # Must match configured Loader Group
-    if not configured_loader_id or chat.id != configured_loader_id:
+    if chat.id != configured_loader_id:
+        logger.debug(f"[LOADER] Ignored message in chat {chat.id} ({chat.title}); configured Loader Group ID is {configured_loader_id}.")
         return
 
     is_media = bool(message.photo or (message.document and (message.document.mime_type or "").startswith("image/")))
@@ -166,12 +183,17 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # Rule 1: Message MUST be a reply
     if not reply_to:
-        logger.info("Invalid Reply | Loader sent images without replying to an order message.")
-        await message.reply_text(
-            "❌ Please reply to the original order message.",
-            reply_to_message_id=message.message_id
-        )
+        logger.warning(f"[LOADER] Reply failed: Loader message {message.message_id} in Loader Group is not a reply to an order.")
+        try:
+            await message.reply_text(
+                "❌ Please reply to the original order message.",
+                reply_to_message_id=message.message_id
+            )
+        except Exception as e:
+            logger.error(f"[LOADER] Failed to send non-reply rejection message: {e}")
         return
+
+    logger.info(f"[LOADER] Reply detected (Loader Msg ID: {message.message_id}, Replied Msg ID: {reply_to.message_id})")
 
     # Rule 2: Identify order from database using replied message ID or text Order ID
     order = await get_order_by_loader_msg_id(reply_to.message_id)
@@ -182,39 +204,51 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
             order = await get_order_by_id(order_id_from_text)
 
     if not order:
-        logger.info(f"Invalid Reply | Replied message {reply_to.message_id} is not a valid bot order message.")
-        await message.reply_text(
-            "❌ Please reply to the original order message.",
-            reply_to_message_id=message.message_id
-        )
+        logger.warning(f"[LOADER] Reply failed: Could not match replied message {reply_to.message_id} to any Order in DB.")
+        try:
+            await message.reply_text(
+                "❌ Please reply to the original order message.",
+                reply_to_message_id=message.message_id
+            )
+        except Exception as e:
+            logger.error(f"[LOADER] Failed to send un-matched order rejection message: {e}")
         return
 
     # Rule 3: Check Order Status (Duplicate Protection & State Check)
     if order.status == "Delivered":
-        logger.info(f"Duplicate Delivery | Loader replied to already delivered Order #{order.id}.")
-        await message.reply_text(
-            "⚠️ This order has already been delivered.",
-            reply_to_message_id=message.message_id
-        )
+        logger.info(f"[LOADER] Duplicate reply detected: Order #{order.id} is already Delivered.")
+        try:
+            await message.reply_text(
+                "⚠️ This order has already been delivered.",
+                reply_to_message_id=message.message_id
+            )
+        except Exception:
+            pass
         return
 
     if order.status == "Cancelled":
-        logger.info(f"Cancelled Order | Loader replied to cancelled Order #{order.id}.")
-        await message.reply_text(
-            f"❌ Order #{order.id} has been cancelled.",
-            reply_to_message_id=message.message_id
-        )
+        logger.info(f"[LOADER] Reply failed: Order #{order.id} is Cancelled.")
+        try:
+            await message.reply_text(
+                f"❌ Order #{order.id} has been cancelled.",
+                reply_to_message_id=message.message_id
+            )
+        except Exception:
+            pass
         return
 
     if order.status == "Expired":
-        logger.info(f"Timeout | Loader replied to expired Order #{order.id}.")
-        await message.reply_text(
-            f"⏰ Order #{order.id} has expired (Pending Too Long).",
-            reply_to_message_id=message.message_id
-        )
+        logger.info(f"[LOADER] Reply failed: Order #{order.id} is Expired.")
+        try:
+            await message.reply_text(
+                f"⏰ Order #{order.id} has expired (Pending Too Long).",
+                reply_to_message_id=message.message_id
+            )
+        except Exception:
+            pass
         return
 
-    logger.info(f"Loader Delivery Received | Order ID: #{order.id} | Email: {order.email}")
+    logger.info(f"[LOADER] Processing media reply for Order #{order.id} (Email: '{order.email}')...")
 
     # Pass media to collector
     await media_collector.add_reply_media_message(

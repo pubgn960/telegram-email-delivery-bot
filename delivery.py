@@ -2,6 +2,7 @@
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
 dispatching image albums to the Client Group, Telegram API retries, database status updates,
 Loader confirmations, and Telegram reactions.
+Includes structured logging tags ([DELIVERY], [REACTION]).
 """
 
 import html
@@ -96,7 +97,7 @@ async def deliver_order_by_id(
     settings = await get_current_settings()
 
     if not order or not order.images:
-        logger.warning(f"Delivery attempted for Order ID #{order_id} but no stored images were found.")
+        logger.warning(f"[DELIVERY] Delivery attempted for Order #{order_id} but no stored images were found.")
         if loader_chat_id and loader_reply_msg_id:
             try:
                 await bot.send_message(
@@ -110,7 +111,7 @@ async def deliver_order_by_id(
 
     # Duplicate delivery prevention
     if order.status == "Delivered":
-        logger.info(f"Duplicate Delivery | Order ID #{order_id} is already delivered. Ignored.")
+        logger.info(f"[DELIVERY] Duplicate Delivery | Order #{order_id} is already delivered. Ignored.")
         if loader_chat_id and loader_reply_msg_id:
             try:
                 await bot.send_message(
@@ -123,7 +124,7 @@ async def deliver_order_by_id(
         return False
 
     if order.status == "Cancelled":
-        logger.info(f"Cancelled Order | Delivery attempted for cancelled Order ID #{order_id}. Ignored.")
+        logger.info(f"[DELIVERY] Cancelled Order | Delivery attempted for cancelled Order #{order_id}. Ignored.")
         if loader_chat_id and loader_reply_msg_id:
             try:
                 await bot.send_message(
@@ -140,7 +141,7 @@ async def deliver_order_by_id(
     loader_group_id = loader_chat_id or settings.delivery_group_id
 
     if not client_chat_id:
-        logger.error(f"Delivery failed: Client Group ID not found for Order ID #{order_id}.")
+        logger.error(f"[DELIVERY] Delivery failed: Client Group ID not found for Order #{order_id}.")
         if loader_group_id and loader_reply_msg_id:
             try:
                 await bot.send_message(
@@ -157,7 +158,7 @@ async def deliver_order_by_id(
     total_images = len(all_images)
     email_escaped = html.escape(order.email)
 
-    logger.info(f"Delivering Order ID: #{order_id} ({total_images} images) to Client Group: {client_chat_id}")
+    logger.info(f"[DELIVERY] Delivering Order #{order_id} ({total_images} images) to Client Group {client_chat_id}")
 
     # 1. Dispatch image albums to Client Group in batches of max 10 items (grouped by file_type)
     grouped_batches: List[List[Image]] = []
@@ -210,12 +211,12 @@ async def deliver_order_by_id(
             parse_mode="HTML"
         )
     except Exception as e:
-        logger.error(f"Failed to send delivery completion header to Client Group: {e}")
+        logger.error(f"[DELIVERY] Failed to send delivery completion header to Client Group: {e}")
 
     # 3. Mark order status as Delivered in DB
     updated_order = await mark_order_delivered(order.id)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    logger.info(f"Delivery Completed | Order ID: #{order.id} delivered.")
+    logger.info(f"[DELIVERY] Images sent | Order #{order.id} ({delivered_count}/{total_images} images) delivered to Client Group {client_chat_id}.")
 
     # 4. Reaction On Customer Order (Add ❤️ reaction to original customer order message in Client Group)
     if order.original_message_id and client_chat_id:
@@ -227,7 +228,9 @@ async def deliver_order_by_id(
             fallback_emoji="✅"
         )
         if cust_reacted:
-            logger.info(f"Customer Reaction Added | ❤️ reaction placed on original customer Order #{order.id}")
+            logger.info(f"[REACTION] Client reaction added ('❤️') on original customer Order #{order.id} in Client Group {client_chat_id}")
+        else:
+            logger.warning(f"[REACTION] Failed to add client reaction ('❤️') on Order #{order.id} in Client Group {client_chat_id}")
 
     # 5. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
     target_loader_msg_id = loader_reply_msg_id or order.loader_message_id
@@ -240,7 +243,9 @@ async def deliver_order_by_id(
             fallback_emoji="✅"
         )
         if loader_reacted:
-            logger.info(f"Loader Reaction Added | ❤️ reaction placed on Loader delivery message for Order #{order.id}")
+            logger.info(f"[REACTION] Loader reaction added ('❤️') on Loader delivery message for Order #{order.id} in Loader Group {loader_group_id}")
+        else:
+            logger.warning(f"[REACTION] Failed to add loader reaction ('❤️') on Order #{order.id} in Loader Group {loader_group_id}")
 
         # Send confirmation message to Loader Group
         loader_notice = (
@@ -257,7 +262,7 @@ async def deliver_order_by_id(
                 parse_mode="HTML"
             )
         except Exception as e:
-            logger.error(f"Failed to send loader delivery confirmation: {e}")
+            logger.error(f"[DELIVERY] Failed to send loader delivery confirmation: {e}")
 
     # 6. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:

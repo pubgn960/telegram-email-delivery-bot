@@ -87,6 +87,7 @@ class MediaGroupCollector:
                 file_type = "document"
 
         if not file_id:
+            logger.warning(f"[LOADER] Received non-image document or unsupported media in message {message.message_id}")
             return
 
         msg_id = message.message_id
@@ -98,7 +99,7 @@ class MediaGroupCollector:
 
         # Single Photo / Document (No media group ID)
         if not media_group_id:
-            logger.info(f"Loader Reply Received | Order ID: {order_id} | Single {file_type}")
+            logger.info(f"[LOADER] Album collected (1 {file_type}) for Order #{order_id} (Loader Msg ID: {msg_id})")
             updated_order, is_dup = await add_images_to_order(
                 order_id=order_id,
                 file_items=[(file_id, file_type)],
@@ -106,7 +107,7 @@ class MediaGroupCollector:
             )
 
             if is_dup:
-                logger.info(f"Duplicate Ignored | Single photo upload for Order ID: {order_id}")
+                logger.info(f"[LOADER] Duplicate Ignored | Single photo upload for Order #{order_id}")
                 return
 
             if updated_order:
@@ -123,7 +124,7 @@ class MediaGroupCollector:
         # Media Group (Album) - Thread safe buffering
         async with self._lock:
             if buffer_key in self._processed_cache:
-                logger.info(f"Duplicate Ignored | Media Group '{media_group_id}' for Order ID: {order_id}")
+                logger.info(f"[LOADER] Duplicate Ignored | Media Group '{media_group_id}' for Order #{order_id}")
                 return
 
             if buffer_key in self._buffers:
@@ -173,7 +174,7 @@ class MediaGroupCollector:
         bot: Bot = buf["bot"]
 
         file_items = [(it[1], it[2]) for it in items]
-        logger.info(f"Album Completed | Order ID: {order_id} | Media Group: '{media_group_id}' | {len(file_items)} images")
+        logger.info(f"[LOADER] Album collected ({len(file_items)} images) for Order #{order_id} (Media Group: '{media_group_id}')")
 
         updated_order, is_dup = await add_images_to_order(
             order_id=order_id,
@@ -187,11 +188,11 @@ class MediaGroupCollector:
                 self._processed_cache.popitem(last=False)
 
         if is_dup:
-            logger.info(f"Duplicate Ignored | Album '{media_group_id}' for Order ID: {order_id}")
+            logger.info(f"[LOADER] Duplicate Ignored | Media Group '{media_group_id}' for Order #{order_id}")
             return
 
         if updated_order:
-            # Trigger automatic delivery to Delivery Group
+            # Trigger automatic delivery to Client Group
             from delivery import deliver_order_by_id
             await deliver_order_by_id(
                 bot=bot,
