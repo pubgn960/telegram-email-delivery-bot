@@ -1,11 +1,13 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
-Initializes database, configures handlers, starts background tasks, and runs bot polling.
+Initializes database, configures handlers, sets Telegram '/' UI command menu,
+starts background tasks, and runs bot polling.
 """
 
 import sys
 import asyncio
 import logging
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -71,6 +73,31 @@ async def post_init(application: Application) -> None:
     """Post-initialization callback run inside the active application event loop."""
     logger.info("Initializing database schema...")
     await init_db()
+
+    # Register Bot Commands list so Telegram displays them in the interactive '/' popup menu
+    commands = [
+        BotCommand("source", "Mark current group as Client Group"),
+        BotCommand("delivery", "Mark current group as Loader Group"),
+        BotCommand("groups", "Show group configuration status"),
+        BotCommand("status", "View bot status & diagnostics"),
+        BotCommand("setup", "View setup guide"),
+        BotCommand("pending", "List pending orders"),
+        BotCommand("delivered", "List latest delivered orders"),
+        BotCommand("find", "Find order by ID or email"),
+        BotCommand("order", "Display detailed order information"),
+        BotCommand("cancel", "Cancel a pending order"),
+        BotCommand("resend", "Re-deliver order images"),
+        BotCommand("stats", "View bot statistics dashboard"),
+        BotCommand("help", "List all admin commands"),
+        BotCommand("export", "Export CSV data report"),
+        BotCommand("backup", "Download SQLite database backup"),
+        BotCommand("restore", "Restore SQLite database from backup")
+    ]
+    try:
+        await application.bot.set_my_commands(commands)
+        logger.info("Successfully registered bot commands for Telegram '/' menu UI.")
+    except Exception as e:
+        logger.warning(f"Failed to register '/' menu bot commands: {e}")
 
     # Initial order timeout check on startup
     expired = await check_order_timeouts(timeout_hours=24)
