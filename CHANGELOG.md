@@ -5,23 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-08-09
+
+### Fixed & Changed
+- **Bug 1 Fix - Duplicate Order "Place Again" (`duplicate_order_callback_handler`)**:
+  - Pressing `✅ Place Again` creates a brand new `Order` in database with a new Order ID.
+  - Automatically checks Group Category (`A` vs `B`).
+  - **Category A**: Copies original customer message to Loader Group, saves `loader_message_id`, sets status `Pending`.
+  - **Category B**: Sends review notification card to Payment Review Group (`-1004441603990`) with `[✅ Accept]` & `[❌ Reject]` buttons, sets status `Pending Approval`.
+  - Edits duplicate prompt message to: `✅ New Order Created\nOrder #xxx`.
+- **Bug 2 Fix - Category B Loader Selection (`category_b_approval_callback_handler`)**:
+  - Loads loader information from DB if cache is empty.
+  - Copies original customer message to selected loader group.
+  - Saves `loader_group_id`, `loader_message_id`, and sets `status = "Pending"`.
+  - Edits review card to: `✅ Order Approved\n\nLoader:\nPakistan Loader\n\nOrder #xxx`.
+- **Logging Improvements**:
+  - Replaced silent `except:` blocks with `logger.exception(...)` for complete stack traces.
+  - Added structured logs: `[LOADER] Selected Loader: ...`, `[LOADER] Copy Success`, `[LOADER] Copy Failed`.
+
 ## [1.18.0] - 2026-08-09
 
 ### Fixed & Changed
 - **Telegram BotCommand Menu Registration Fix**:
-  - Replaced uppercase commands in `BotCommand` registration (`"A"` and `"B"`) with lowercase commands (`"a"` and `"b"`) to comply with Telegram API rules.
-  - Retained full backward compatibility for command handlers accepting both lowercase and uppercase aliases: `CommandHandler(["a", "A"], category_a_command)` and `CommandHandler(["b", "B"], category_b_command)`.
-  - Added pre-registration validation (`validate_bot_command`) verifying command names match `^[a-z0-9_]{1,32}$` and descriptions match `1 <= len <= 256`.
-  - Improved command registration exception logging with `logger.exception("[COMMANDS] Failed to register bot commands.")` for full stack trace visibility.
-  - Cleaned up Telegram `/` popup menu to display only 19 primary commands while keeping maintenance commands functional via direct typing.
+  - Replaced uppercase commands in `BotCommand` registration (`"A"` and `"B"`) with lowercase commands (`"a"` and `"b"`).
+  - Maintained command handlers for both lowercase and uppercase aliases.
 
 ## [1.17.0] - 2026-08-09
 
 ### Added & Changed
 - **Multi-Loader Approval System (Category B v2)**:
   - Implemented `Loader` declarative model and `loaders` database table.
-  - Category B interactive button workflow (`[✅ Accept]`, `[❌ Reject]`, `Select Loader` dynamic menu, `[❌ Cancel]`).
-  - Added `/loaderadd`, `/loaderlist`, and `/loaderremove` admin commands.
 
 ## [1.16.0] - 2026-08-09
 

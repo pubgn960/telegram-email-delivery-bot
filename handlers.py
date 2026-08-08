@@ -166,7 +166,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             await message.reply_text(warning_msg, reply_markup=keyboard, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"[CLIENT] Failed to send duplicate order prompt: {e}")
+            logger.exception(f"[CLIENT] Failed to send duplicate order prompt: {e}")
         return
 
     # Add 👍 reaction to ORIGINAL customer order message in Client Group
@@ -202,8 +202,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         from_chat_id=chat.id,
                         message_id=message.message_id
                     )
-                except Exception:
-                    pass
+                except Exception as e_copy:
+                    logger.exception(f"[PAYMENT] copy_message failed: {e_copy}")
 
                 group_title = chat.title or "Client Group"
                 card_msg = (
@@ -227,7 +227,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 logger.info(f"[PAYMENT] Order #{order.id} routed to Payment Review Group (-1004441603990).")
             except Exception as e:
-                logger.error(f"[PAYMENT] Failed to route Order #{order.id} to Payment Review Group: {e}")
+                logger.exception(f"[PAYMENT] Failed to route Order #{order.id} to Payment Review Group: {e}")
         else:
             logger.warning(f"[PAYMENT] Order #{order.id} registered as Category B, but Payment Review Group is not configured yet!")
 
@@ -251,7 +251,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         message_id=message.message_id
                     )
                 except Exception as e_copy:
-                    logger.debug(f"copy_message failed: {e_copy}. Fallback to raw text send_message.")
+                    logger.exception(f"copy_message failed: {e_copy}. Fallback to raw text send_message.")
                     forwarded_msg = await context.bot.send_message(
                         chat_id=loader_group_id,
                         text=text_content
@@ -261,7 +261,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
                 logger.info("[DETECTOR] Order forwarded.")
             except Exception as e:
-                logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
+                logger.exception(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
         else:
             logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
 
@@ -294,18 +294,23 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
         await message.reply_text(reply_text, reply_to_message_id=message.message_id)
         logger.info(f"[CLIENT] Sent manual placement notice to customer for edited message {message.message_id}.")
     except Exception as e:
-        logger.error(f"[CLIENT] Failed to send manual placement notice for edited message: {e}")
+        logger.exception(f"[CLIENT] Failed to send manual placement notice for edited message: {e}")
 
 
 async def duplicate_order_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles inline keyboard button callbacks for duplicate order confirmation (Place Again / Cancel).
+    Executing 'Place Again' creates a brand new Order in database, generates a new Order ID,
+    detects Group Category (A vs B), forwards order, saves loader_message_id, and edits warning message.
     """
     query = update.callback_query
     if not query or not query.data:
         return
 
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.exception(f"[CLIENT] Failed to answer callback query: {e}")
 
     data = query.data
     if not data.startswith(("dup_confirm:", "dup_cancel:")):
@@ -316,68 +321,124 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
         return
 
     order_id = int(order_id_str)
-    order = await get_order_by_id(order_id)
+    dup_order_record = await get_order_by_id(order_id)
 
-    if not order:
+    if not dup_order_record:
         try:
             await query.edit_message_text("❌ Order record not found.")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[CLIENT] Failed to edit message: {e}")
         return
 
-    loader_group_id = BOT_SETTINGS["delivery_group_id"]
+    client_chat_id = dup_order_record.client_chat_id
+    original_msg_id = dup_order_record.original_message_id
+    email = dup_order_record.email
+    package_desc = dup_order_record.package or ""
 
     if action == "dup_confirm":
-        # Customer tapped ✅ Place Again
-        async with AsyncSessionLocal() as session:
-            stmt = update_sql(Order).where(Order.id == order.id).values(status="Pending")
-            await session.execute(stmt)
-            await session.commit()
+        # Customer pressed ✅ Place Again - Execute exact workflow of a brand new order
+        logger.info(f"[CLIENT] Customer pressed 'Place Again' for email '{email}'. Creating new Order...")
 
-        # Copy original customer message to Loader Group
-        if loader_group_id and order.client_chat_id and order.original_message_id:
-            try:
+        # Determine Group Category ('A' or 'B')
+        category = CLIENT_GROUPS_CACHE.get(client_chat_id, "A") if client_chat_id else "A"
+
+        if category == "B":
+            # Create brand new Order with status 'Pending Approval'
+            new_order = await create_order(
+                email=email,
+                client_chat_id=client_chat_id,
+                original_message_id=original_msg_id,
+                package=package_desc,
+                status="Pending Approval"
+            )
+            payment_group_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
+            if payment_group_id and client_chat_id and original_msg_id:
+                try:
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=payment_group_id,
+                            from_chat_id=client_chat_id,
+                            message_id=original_msg_id
+                        )
+                    except Exception as e_copy:
+                        logger.exception(f"[PAYMENT] copy_message failed for Place Again order: {e_copy}")
+
+                    card_msg = (
+                        f"🟨 <b>NEW ORDER</b>\n\n"
+                        f"<b>Order ID:</b> #{new_order.id}\n\n"
+                        f"<b>Email:</b>\n{html.escape(new_order.email)}\n\n"
+                        f"<b>Group:</b>\nClient Group\n\n"
+                        f"Choose an action."
+                    )
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Accept", callback_data=f"catb_accept:{new_order.id}"),
+                            InlineKeyboardButton("❌ Reject", callback_data=f"catb_reject:{new_order.id}")
+                        ]
+                    ])
+                    await context.bot.send_message(
+                        chat_id=payment_group_id,
+                        text=card_msg,
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"[PAYMENT] New Order #{new_order.id} (Place Again) routed to Payment Review Group.")
+                except Exception as e:
+                    logger.exception(f"[PAYMENT] Failed to route Place Again Order #{new_order.id} to Payment Review Group: {e}")
+
+        else:
+            # Category A: Create brand new Order with status 'Pending'
+            new_order = await create_order(
+                email=email,
+                client_chat_id=client_chat_id,
+                original_message_id=original_msg_id,
+                package=package_desc,
+                status="Pending"
+            )
+            loader_group_id = BOT_SETTINGS["delivery_group_id"]
+            if loader_group_id and client_chat_id and original_msg_id:
                 try:
                     forwarded_msg = await context.bot.copy_message(
                         chat_id=loader_group_id,
-                        from_chat_id=order.client_chat_id,
-                        message_id=order.original_message_id
+                        from_chat_id=client_chat_id,
+                        message_id=original_msg_id
                     )
-                except Exception:
-                    forwarded_msg = await context.bot.send_message(
-                        chat_id=loader_group_id,
-                        text=f"Order #{order.id} | Email: {order.email}"
-                    )
-
-                await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
-                logger.info(f"[CLIENT] Duplicate Order #{order.id} confirmed and copied to Loader Group {loader_group_id}")
-            except Exception as e:
-                logger.error(f"[CLIENT] Failed to post duplicate Order #{order.id} to Loader Group: {e}")
+                    await set_order_loader_message_id(new_order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
+                    logger.info(f"[CLIENT] New Order #{new_order.id} (Place Again) copied to Loader Group {loader_group_id} (Loader Msg ID: {forwarded_msg.message_id}).")
+                except Exception as e:
+                    logger.exception(f"[CLIENT] Failed to copy Place Again Order #{new_order.id} to Loader Group: {e}")
 
         # Add 👍 reaction to original customer order message
-        if order.client_chat_id and order.original_message_id:
+        if client_chat_id and original_msg_id:
             await safe_set_message_reaction(
                 bot=context.bot,
-                chat_id=order.client_chat_id,
-                message_id=order.original_message_id,
+                chat_id=client_chat_id,
+                message_id=original_msg_id,
                 emoji="👍",
                 fallback_emoji=None,
                 log_tag="[REACTION]"
             )
 
+        # Edit duplicate message as required by spec:
+        # ✅ New Order Created
+        # Order #xxx
+        edit_text = (
+            f"✅ <b>New Order Created</b>\n"
+            f"Order #{new_order.id}"
+        )
         try:
-            await query.edit_message_text("✅ Order confirmed and sent to Loader Group.", parse_mode="HTML")
-        except Exception:
-            pass
+            await query.edit_message_text(edit_text, parse_mode="HTML")
+        except Exception as e:
+            logger.exception(f"[CLIENT] Failed to edit duplicate message text: {e}")
 
     elif action == "dup_cancel":
-        # Customer tapped ❌ Cancel
-        await cancel_order(order.id)
-        logger.info(f"[CLIENT] Duplicate Order #{order.id} cancelled by customer.")
+        # Customer pressed ❌ Cancel
+        await cancel_order(order_id)
+        logger.info(f"[CLIENT] Duplicate Order #{order_id} cancelled by customer.")
         try:
             await query.edit_message_text("❌ Order cancelled.", parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[CLIENT] Failed to edit cancelled message text: {e}")
 
 
 # ==========================================
@@ -396,9 +457,12 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
     if not query or not query.data or not query.data.startswith("catb_"):
         return
 
-    await query.answer()
-    data = query.data
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.exception(f"[PAYMENT] Failed to answer query: {e}")
 
+    data = query.data
     parts = data.split(":")
     action = parts[0]
 
@@ -416,22 +480,24 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
         )
         try:
             await query.edit_message_text(card_text, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[PAYMENT] Failed to edit rejected review card: {e}")
 
     elif action == "catb_accept":
         if len(parts) < 2 or not parts[1].isdigit():
             return
         order_id = int(parts[1])
 
-        # Generate dynamic loader buttons from LOADERS_CACHE / DB
+        # Load loader information from DB if cache is empty
+        if not LOADERS_CACHE:
+            await reload_loaders_cache()
+
         loaders = list(LOADERS_CACHE.values())
         if not loaders:
             loaders = await get_all_loaders()
 
         buttons = []
         if not loaders and BOT_SETTINGS["delivery_group_id"]:
-            # Fallback to primary loader if no custom loaders created
             buttons.append([InlineKeyboardButton("📦 Primary Loader", callback_data=f"catb_select_loader:{order_id}:primary")])
         else:
             for l in loaders:
@@ -448,8 +514,8 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
         )
         try:
             await query.edit_message_text(select_text, reply_markup=keyboard, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[PAYMENT] Failed to edit Select Loader card: {e}")
 
     elif action == "catb_select_loader":
         if len(parts) < 3 or not parts[1].isdigit():
@@ -461,9 +527,13 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
         if not order:
             try:
                 await query.edit_message_text(f"❌ Order #{order_id} not found.")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(f"[LOADER] Failed to edit message: {e}")
             return
+
+        # 1. Load loader information from DB if cache is empty
+        if not LOADERS_CACHE:
+            await reload_loaders_cache()
 
         target_group_id = None
         loader_name = "Loader Group"
@@ -476,44 +546,60 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
             if lid in LOADERS_CACHE:
                 target_group_id = LOADERS_CACHE[lid]["group_id"]
                 loader_name = LOADERS_CACHE[lid]["name"]
+            else:
+                # Direct DB lookup fallback
+                loaders = await get_all_loaders()
+                for l in loaders:
+                    if l.id == lid:
+                        target_group_id = l.group_id
+                        loader_name = l.loader_name
+                        break
+
+        logger.info(f"[LOADER]\nSelected Loader:\n{loader_name} (Group ID: {target_group_id})")
 
         if not target_group_id:
+            logger.error(f"[LOADER]\nCopy Failed\nLoader Group for ID '{loader_key}' not found.")
             try:
                 await query.edit_message_text(f"❌ Loader Group for ID '{loader_key}' not found.")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(f"[LOADER] Failed to edit message: {e}")
             return
 
-        # Copy original customer message to selected Loader Group
+        # 2. Copy ORIGINAL customer message to selected loader group
         if order.client_chat_id and order.original_message_id:
             try:
-                try:
-                    forwarded_msg = await context.bot.copy_message(
-                        chat_id=target_group_id,
-                        from_chat_id=order.client_chat_id,
-                        message_id=order.original_message_id
-                    )
-                except Exception:
-                    forwarded_msg = await context.bot.send_message(
-                        chat_id=target_group_id,
-                        text=f"Order #{order.id} | Email: {order.email}"
-                    )
+                forwarded_msg = await context.bot.copy_message(
+                    chat_id=target_group_id,
+                    from_chat_id=order.client_chat_id,
+                    message_id=order.original_message_id
+                )
+                logger.info(f"[LOADER]\nCopy Success\nOrder #{order.id} copied to Loader Group '{loader_name}' ({target_group_id}) with Loader Msg ID {forwarded_msg.message_id}.")
 
+                # 3. Save loader_group_id, loader_message_id, and 4. status = Pending
                 await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=target_group_id)
                 await update_order_status(order.id, "Pending")
-                logger.info(f"[PAYMENT] Order #{order.id} approved and sent to Loader Group '{loader_name}' ({target_group_id}).")
             except Exception as e:
-                logger.error(f"[PAYMENT] Failed to copy Order #{order.id} to Loader Group {target_group_id}: {e}")
+                logger.exception(f"[LOADER]\nCopy Failed\nFailed to copy Order #{order.id} to Loader Group {target_group_id}: {e}")
+                try:
+                    await query.edit_message_text(f"❌ Failed to forward order to loader group: {e}")
+                except Exception as e_edit:
+                    logger.exception(f"[LOADER] Failed to edit error message: {e_edit}")
+                return
 
+        # 5. Edit review card:
+        # ✅ Order Approved
+        # Loader:
+        # Pakistan Loader
+        # Order #xxx
         success_text = (
-            f"✅ <b>Order Approved & Sent</b>\n\n"
-            f"<b>Order ID:</b> #{order.id}\n"
-            f"<b>Assigned Loader:</b> {html.escape(loader_name)}"
+            f"✅ <b>Order Approved</b>\n\n"
+            f"<b>Loader:</b>\n{html.escape(loader_name)}\n\n"
+            f"<b>Order #{order.id}</b>"
         )
         try:
             await query.edit_message_text(success_text, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[LOADER] Failed to edit review card: {e}")
 
     elif action == "catb_cancel":
         if len(parts) < 2 or not parts[1].isdigit():
@@ -540,8 +626,8 @@ async def category_b_approval_callback_handler(update: Update, context: ContextT
         ])
         try:
             await query.edit_message_text(card_msg, reply_markup=keyboard, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[PAYMENT] Failed to edit cancelled review card: {e}")
 
 
 async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -576,7 +662,7 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             await message.reply_text("⛔ You are not authorized to deliver orders.")
         except Exception as e:
-            logger.error(f"[LOADER] Failed to send unauthorized delivery error notice: {e}")
+            logger.exception(f"[LOADER] Failed to send unauthorized delivery error notice: {e}")
         return
 
     reply_to = message.reply_to_message
@@ -614,7 +700,7 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 logger.info(f"[CLIENT] Wrong details notice sent to Client Group for Order #{order.id}.")
             except Exception as e:
-                logger.error(f"[CLIENT] Failed to send wrong details notice for Order #{order.id}: {e}")
+                logger.exception(f"[CLIENT] Failed to send wrong details notice for Order #{order.id}: {e}")
 
         # React to loader message with ❌ (fallback ⚠️)
         await safe_set_message_reaction(
@@ -641,8 +727,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
                 "⚠️ This order has already been delivered.",
                 reply_to_message_id=message.message_id
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[LOADER] Failed to send duplicate delivery notice: {e}")
         return
 
     if order.status == "Cancelled":
@@ -652,8 +738,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
                 f"❌ Order #{order.id} has been cancelled.",
                 reply_to_message_id=message.message_id
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[LOADER] Failed to send order cancelled notice: {e}")
         return
 
     if order.status == "Expired":
@@ -663,8 +749,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
                 f"⏰ Order #{order.id} has expired (Pending Too Long).",
                 reply_to_message_id=message.message_id
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"[LOADER] Failed to send order expired notice: {e}")
         return
 
     logger.info(f"[LOADER] Processing media reply for Order #{order.id} (Email: '{order.email}')...")
@@ -905,7 +991,8 @@ async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TY
                     from_chat_id=order.client_chat_id,
                     message_id=order.original_message_id
                 )
-            except Exception:
+            except Exception as e_copy:
+                logger.exception(f"copy_message failed: {e_copy}")
                 forwarded_msg = await context.bot.send_message(
                     chat_id=loader_group_id,
                     text=f"Order #{order.id} | Email: {order.email}"
@@ -914,7 +1001,7 @@ async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TY
             await set_order_loader_message_id(order.id, forwarded_msg.message_id, loader_group_id=loader_group_id)
             logger.info(f"[PAYMENT] Order #{order.id} approved. Forwarded to Loader Group.")
         except Exception as e:
-            logger.error(f"[PAYMENT] Failed to forward approved Order #{order.id} to Loader Group: {e}")
+            logger.exception(f"[PAYMENT] Failed to forward approved Order #{order.id} to Loader Group: {e}")
     else:
         logger.warning(f"[PAYMENT] Order #{order.id} approved, but Loader Group is not configured yet!")
 
@@ -1470,7 +1557,7 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="HTML"
         )
     except Exception as e:
-        logger.error(f"Error creating database backup: {e}")
+        logger.exception(f"Error creating database backup: {e}")
         await update.effective_message.reply_text(f"❌ Failed to create database backup: {e}")
 
 
@@ -1512,7 +1599,7 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await update.effective_message.reply_text("✅ Database successfully restored from backup!")
     except Exception as e:
-        logger.error(f"Error restoring database backup: {e}")
+        logger.exception(f"Error restoring database backup: {e}")
         await update.effective_message.reply_text(f"❌ Database restore failed: {e}")
 
 
