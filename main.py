@@ -168,10 +168,10 @@ def main() -> None:
         group=1
     )
 
-    # Register Loader Group Handler (Group 2 - Loader Photos / Photo Documents replied to orders)
+    # Register Loader Group Handler (Group 2 - Loader Photos / Photo Documents / Text Replies like 'wrong')
     application.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
+            (filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND),
             delivery_group_handler
         ),
         group=2

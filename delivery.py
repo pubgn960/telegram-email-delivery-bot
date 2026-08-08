@@ -1,7 +1,7 @@
 """
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
-dispatching image albums to the Client Group, Telegram API retries, database status updates,
-Loader confirmations, and Telegram reactions.
+dispatching image albums to the Client Group, caption email overrides, Telegram API retries,
+database status updates, Loader confirmations, and Telegram reactions.
 Includes structured logging tags ([DELIVERY], [REACTION]).
 """
 
@@ -14,6 +14,7 @@ from telegram import Bot, InputMediaPhoto, InputMediaDocument
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from config import Config
+from email_parser import extract_last_email
 from database import (
     BOT_SETTINGS,
     get_order_by_id,
@@ -78,10 +79,11 @@ async def deliver_order_by_id(
     order_id: int,
     loader_chat_id: Optional[int] = None,
     loader_reply_msg_id: Optional[int] = None,
-    target_delivery_chat_id: Optional[int] = None
+    target_delivery_chat_id: Optional[int] = None,
+    caption_text: Optional[str] = None
 ) -> bool:
     """
-    Delivers stored image albums for an order to the Client Group, sends clean delivery header,
+    Delivers stored image albums for an order to the Client Group, sends caption email override if present,
     adds ❤️ reactions to original customer message and loader delivery message, and notifies Loader Group.
 
     Args:
@@ -90,6 +92,7 @@ async def deliver_order_by_id(
         loader_chat_id (Optional[int]): Loader Group Chat ID.
         loader_reply_msg_id (Optional[int]): Loader message ID to reply to / edit.
         target_delivery_chat_id (Optional[int]): Override Client Group Chat ID.
+        caption_text (Optional[str]): Caption or text from Loader's reply message.
 
     Returns:
         bool: True if images were delivered successfully, False otherwise.
@@ -156,7 +159,6 @@ async def deliver_order_by_id(
 
     all_images: List[Image] = list(order.images)
     total_images = len(all_images)
-    email_escaped = html.escape(order.email)
 
     logger.info(f"[DELIVERY] Delivering Order #{order_id} ({total_images} images) to Client Group {client_chat_id}")
 
@@ -197,21 +199,18 @@ async def deliver_order_by_id(
         if sent:
             delivered_count += len(batch)
 
-    # 2. Send Clean Delivery Completion Header in Client Group (No Customer Name!)
-    completion_text = (
-        f"📧 <b>Email</b>\n{email_escaped}\n\n"
-        f"📦 <b>Order ID</b>\n#{order.id}\n\n"
-        f"✅ <b>Delivery Completed</b>"
-    )
-
-    try:
-        await bot.send_message(
-            chat_id=client_chat_id,
-            text=completion_text,
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.error(f"[DELIVERY] Failed to send delivery completion header to Client Group: {e}")
+    # 2. Caption Email Override Handling (Send ONLY the last valid email if loader caption contains one)
+    caption_email = extract_last_email(caption_text)
+    if caption_email:
+        try:
+            await bot.send_message(
+                chat_id=client_chat_id,
+                text=caption_email,
+                reply_to_message_id=order.original_message_id
+            )
+            logger.info(f"[DELIVERY] Sent caption email override message '{caption_email}' to Client Group.")
+        except Exception as e:
+            logger.error(f"[DELIVERY] Failed to send caption email message to Client Group: {e}")
 
     # 3. Mark order status as Delivered in DB
     updated_order = await mark_order_delivered(order.id)

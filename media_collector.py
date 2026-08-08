@@ -2,6 +2,7 @@
 Media Group Collector module supporting debounced album buffering for Reply-Based Delivery Workflow.
 Buffers incoming images/documents replied to an order message, links them via Order ID,
 and triggers automated Delivery Group dispatching upon completion.
+Includes caption text capture for Loader caption email overrides.
 Also maintains short-lived user email session tracking.
 """
 
@@ -51,7 +52,7 @@ class MediaGroupCollector:
 
     def __init__(self, timeout: float = Config.MEDIA_GROUP_TIMEOUT):
         self.timeout = timeout
-        # Structure: buffer_key -> { "order_id": int, "email": str, "loader_chat_id": int, "loader_msg_id": int, "items": [(msg_id, file_id, file_type)], "task": Task }
+        # Structure: buffer_key -> { "order_id": int, "email": str, "loader_chat_id": int, "loader_msg_id": int, "items": [(msg_id, file_id, file_type)], "caption_texts": [str], "task": Task }
         self._buffers: Dict[str, Dict[str, Any]] = {}
         # LRU cache for processed album keys
         self._processed_cache: OrderedDict = OrderedDict()
@@ -62,7 +63,8 @@ class MediaGroupCollector:
         message: Message,
         order_id: int,
         email: str,
-        bot: Bot
+        bot: Bot,
+        caption_text: Optional[str] = None
     ) -> None:
         """
         Buffers an incoming photo or photo-document message that is a reply to an Order Notification.
@@ -72,6 +74,7 @@ class MediaGroupCollector:
             order_id (int): Extracted target Order ID.
             email (str): Extracted target customer email.
             bot (Bot): Telegram bot instance for triggering delivery.
+            caption_text (Optional[str]): Caption or text content from Loader reply message.
         """
         file_id: Optional[str] = None
         file_type: str = "photo"
@@ -93,6 +96,7 @@ class MediaGroupCollector:
         msg_id = message.message_id
         media_group_id = message.media_group_id
         loader_chat_id = message.chat.id
+        txt = caption_text or message.caption or message.text or ""
 
         # Unique buffer key for media group or single message
         buffer_key = f"{order_id}_{media_group_id}" if media_group_id else f"{order_id}_single_{msg_id}"
@@ -117,7 +121,8 @@ class MediaGroupCollector:
                     bot=bot,
                     order_id=order_id,
                     loader_chat_id=loader_chat_id,
-                    loader_reply_msg_id=msg_id
+                    loader_reply_msg_id=msg_id,
+                    caption_text=txt
                 )
             return
 
@@ -132,6 +137,8 @@ class MediaGroupCollector:
                 if buf.get("task") and not buf["task"].done():
                     buf["task"].cancel()
                 buf["items"].append((msg_id, file_id, file_type))
+                if txt:
+                    buf["caption_texts"].append(txt)
             else:
                 self._buffers[buffer_key] = {
                     "order_id": order_id,
@@ -141,6 +148,7 @@ class MediaGroupCollector:
                     "loader_msg_id": msg_id,
                     "bot": bot,
                     "items": [(msg_id, file_id, file_type)],
+                    "caption_texts": [txt] if txt else [],
                     "task": None
                 }
 
@@ -172,6 +180,8 @@ class MediaGroupCollector:
         loader_chat_id: int = buf["loader_chat_id"]
         loader_msg_id: int = buf["loader_msg_id"]
         bot: Bot = buf["bot"]
+        caption_texts: List[str] = buf.get("caption_texts", [])
+        combined_caption = "\n".join(caption_texts) if caption_texts else None
 
         file_items = [(it[1], it[2]) for it in items]
         logger.info(f"[LOADER] Album collected ({len(file_items)} images) for Order #{order_id} (Media Group: '{media_group_id}')")
@@ -198,7 +208,8 @@ class MediaGroupCollector:
                 bot=bot,
                 order_id=order_id,
                 loader_chat_id=loader_chat_id,
-                loader_reply_msg_id=loader_msg_id
+                loader_reply_msg_id=loader_msg_id,
+                caption_text=combined_caption
             )
 
 

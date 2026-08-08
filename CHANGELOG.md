@@ -5,13 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-08
+
+### Added & Changed
+- **Removed Delivery Summary Card**: Removed the extra completion summary card (`📧 Email ... 📦 Order ID ... ✅ Delivery Completed`) sent after image delivery. Customers receive only images/album and caption email override (if present).
+- **Caption Email Override**: If the Loader's reply text/caption contains valid email addresses, `extract_last_email()` extracts the last valid email and sends **ONLY** that email address as a text message to the customer (replying to the original customer message). Non-email caption text (e.g. `AG Done`, `Completed`) is ignored. Database email remains unchanged.
+- **Wrong Details Workflow**: When the Loader replies to an order with text or caption containing the word `wrong` (case-insensitive):
+  - Sends `❌ Please check and correct your details, then send them again.` to the customer in the Client Group (replying to customer's order).
+  - Reacts to the Loader's message with `❌` (fallback `⚠️`).
+  - Keeps order status as `Pending` without delivering images or deleting records.
+
 ## [1.7.0] - 2026-08-08
 
 ### Refactored & Changed
-- **Global In-Memory `BOT_SETTINGS` Cache**: Refactored the group configuration system to eliminate per-message database queries. Incoming updates in `source_group_handler` and `delivery_group_handler` validate group IDs strictly in RAM using `BOT_SETTINGS["source_group_id"]` and `BOT_SETTINGS["delivery_group_id"]`.
+- **Global In-Memory `BOT_SETTINGS` Cache**: Refactored group configuration system to eliminate per-message database queries. Incoming updates in `source_group_handler` and `delivery_group_handler` validate group IDs strictly in RAM using `BOT_SETTINGS["source_group_id"]` and `BOT_SETTINGS["delivery_group_id"]`.
 - **Startup Settings Pre-loading**: Added `reload_bot_settings_cache()` in `post_init()`, loading settings from database once during bot startup. Added `[CACHE]` startup logs (`Source Group Loaded: ...`, `Delivery Group Loaded: ...`, or `No groups configured.`).
-- **Dynamic Command Cache Updates**: `/source` and `/delivery` commands save changes to PostgreSQL/SQLite and immediately update `BOT_SETTINGS` in-memory so no restart is required.
-- **Restart Resilience**: Configuration is automatically loaded from the database across Railway restarts.
 
 ## [1.6.0] - 2026-08-08
 

@@ -1,11 +1,12 @@
 """
 Email, Order ID, and Package extraction module using regular expressions.
 Parses, sanitizes, and normalizes email addresses, Order IDs, and package text from messages.
+Includes extract_last_email helper for Loader caption email overrides.
 """
 
 import re
 import logging
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,30 @@ def extract_email(text: Optional[str]) -> Optional[str]:
         return email
 
     return None
+
+
+def extract_last_email(text: Optional[str]) -> Optional[str]:
+    """
+    Scans text for all valid email addresses and returns the LAST valid email address found.
+    Normalizes to lowercase and strips trailing punctuation.
+
+    Args:
+        text (str, optional): The input string to scan (loader caption/text).
+
+    Returns:
+        Optional[str]: The last normalized email address if found, else None.
+    """
+    if not text:
+        return None
+
+    matches = EMAIL_REGEX.findall(text)
+    if not matches:
+        return None
+
+    last_raw = matches[-1].strip()
+    email = last_raw.rstrip(".,;!)]>").lower()
+    logger.debug(f"Extracted last email override: '{email}' from text.")
+    return email
 
 
 def extract_order_id(text: Optional[str]) -> Optional[int]:

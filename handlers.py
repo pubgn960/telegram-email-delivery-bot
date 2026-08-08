@@ -1,7 +1,7 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
-Keyword-Based Order Detection (keywords.py), Telegram Reactions, and Admin Commands.
+Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow, Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS cache for zero-database-query message filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
 """
@@ -19,7 +19,7 @@ from telegram.error import TelegramError
 
 from config import Config
 from keywords import contains_order_keyword
-from email_parser import extract_email, extract_order_id, extract_package
+from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -157,8 +157,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     """
     Monitors messages in Group 2 (Loader Group).
     Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
-    Validates that incoming images/documents are sent strictly as a reply to a valid bot Order Message.
-    Identifies order by DB lookup and triggers album debouncing and automatic delivery.
+    Validates that incoming text or media is sent strictly as a reply to a valid bot Order Message.
+    Supports Wrong Details Workflow ('wrong' text reply) and Caption Email Overrides.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -178,10 +178,6 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         logger.debug(f"[LOADER] Ignored message in chat {chat.id} ({chat.title}); configured Loader Group ID is {configured_loader_id}.")
         return
 
-    is_media = bool(message.photo or (message.document and (message.document.mime_type or "").startswith("image/")))
-    if not is_media:
-        return
-
     reply_to = message.reply_to_message
 
     # Rule 1: Message MUST be a reply
@@ -196,7 +192,7 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
             logger.error(f"[LOADER] Failed to send non-reply rejection message: {e}")
         return
 
-    logger.info(f"[LOADER] Reply detected (Loader Msg ID: {message.message_id}, Replied Msg ID: {reply_to.message_id})")
+    text_content = message.text or message.caption or ""
 
     # Rule 2: Identify order from database using replied message ID or text Order ID
     order = await get_order_by_loader_msg_id(reply_to.message_id)
@@ -215,6 +211,38 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
         except Exception as e:
             logger.error(f"[LOADER] Failed to send un-matched order rejection message: {e}")
+        return
+
+    # Wrong Details Workflow: Check if loader reply contains the word 'wrong' (case-insensitive)
+    if "wrong" in text_content.lower():
+        logger.info(f"[LOADER] Wrong details reported by loader for Order #{order.id}.")
+        client_chat_id = order.client_chat_id or BOT_SETTINGS["source_group_id"]
+        if client_chat_id and order.original_message_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=client_chat_id,
+                    text="❌ Please check and correct your details, then send them again.",
+                    reply_to_message_id=order.original_message_id
+                )
+                logger.info(f"[CLIENT] Wrong details notice sent to Client Group for Order #{order.id}.")
+            except Exception as e:
+                logger.error(f"[CLIENT] Failed to send wrong details notice for Order #{order.id}: {e}")
+
+        # React to loader message with ❌ (fallback ⚠️)
+        await safe_set_message_reaction(
+            bot=context.bot,
+            chat_id=chat.id,
+            message_id=message.message_id,
+            emoji="❌",
+            fallback_emoji="⚠️",
+            log_tag="[REACTION]"
+        )
+
+        # Do NOT deliver images, keep order Pending, do NOT delete anything
+        return
+
+    is_media = bool(message.photo or (message.document and (message.document.mime_type or "").startswith("image/")))
+    if not is_media:
         return
 
     # Rule 3: Check Order Status (Duplicate Protection & State Check)
@@ -253,12 +281,13 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     logger.info(f"[LOADER] Processing media reply for Order #{order.id} (Email: '{order.email}')...")
 
-    # Pass media to collector
+    # Pass media to collector with caption text for email override processing
     await media_collector.add_reply_media_message(
         message=message,
         order_id=order.id,
         email=order.email,
-        bot=context.bot
+        bot=context.bot,
+        caption_text=text_content
     )
 
 

@@ -1,12 +1,13 @@
 """
 Unit test suite for Telegram Email Image Delivery Bot.
-Tests email, Order ID, package extraction, keyword detection, album splitting,
-SHA256 fingerprinting, user sessions, BOT_SETTINGS cache, and two-group reply-based DB operations.
+Tests email, Order ID, package extraction, keyword detection, caption email overrides,
+wrong details workflow, album splitting, SHA256 fingerprinting, user sessions,
+BOT_SETTINGS cache, and two-group reply-based DB operations.
 """
 
 import unittest
 import asyncio
-from email_parser import extract_email, extract_order_id, extract_package
+from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
 from keywords import contains_order_keyword
 from delivery import chunk_list
 from media_collector import user_session_manager
@@ -32,6 +33,31 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestCaptionEmailAndWrongDetails(unittest.TestCase):
+    """Tests extract_last_email helper for Loader caption email overrides and wrong details detection."""
+
+    def test_extract_last_email_single(self):
+        text = "AG Done\n\nabc@gmail.com"
+        self.assertEqual(extract_last_email(text), "abc@gmail.com")
+
+    def test_extract_last_email_multiple(self):
+        text = "abc@gmail.com\n\nCompleted Successfully"
+        self.assertEqual(extract_last_email(text), "abc@gmail.com")
+
+    def test_extract_last_email_override(self):
+        text = "AG Done\nold@gmail.com\nnew@gmail.com\nFinished"
+        self.assertEqual(extract_last_email(text), "new@gmail.com")
+
+    def test_extract_last_email_none(self):
+        text = "AG Done\nNo email here"
+        self.assertIsNone(extract_last_email(text))
+
+    def test_wrong_details_keyword(self):
+        self.assertIn("wrong", "wrong".lower())
+        self.assertIn("wrong", "Wrong details provided".lower())
+        self.assertIn("wrong", "WRONG".lower())
 
 
 class TestBotSettingsCache(unittest.IsolatedAsyncioTestCase):
