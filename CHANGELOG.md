@@ -5,49 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-08-09
+
+### Changed
+- **Removed Non-Reply & Unmatched Reply Warning Messages in Loader Group**:
+  - Removed chat error messages (`❌ Please reply to the original order message.`) when staff send non-reply messages or chat in the Loader Group.
+  - Replaced with silent logging: `[LOADER] Ignored non-reply message.`
+  - Removed chat error messages when a reply does not match any active order in DB.
+  - Replaced with silent logging: `[LOADER] Ignored reply that does not match any active order.`
+  - Valid order replies continue to collect images, process `wrong` status, deliver images to customer, update database, and set reactions.
+
 ## [1.13.0] - 2026-08-09
 
 ### Added & Changed
 - **Ignore Super Admin & Delivery User Messages in Client Group**:
-  - Updated `source_group_handler` and `edited_message_handler` to filter out messages sent by Super Admins (`is_super_admin(user_id)`) and Delivery Users (`is_delivery_user(user_id)`).
-  - Super Admin messages in Client Group are ignored completely without keyword detection, order creation, forwarding, duplicate checking, or database modification.
-    - Logged: `[CLIENT] Ignored Super Admin message. User ID: 1573531032`
-  - Delivery User messages in Client Group are ignored completely.
-    - Logged: `[CLIENT] Ignored Delivery User message. User ID: <user_id>`
-  - Only messages from normal customers (not Super Admin and not Delivery User) are processed by the order detection workflow.
+  - Super Admin (`1573531032`) and Delivery User (`1078400998`, `1858358195`) messages in Client Group are ignored completely without keyword detection, order creation, or database saves.
+  - Logs: `[CLIENT] Ignored Super Admin message. User ID: 1573531032` and `[CLIENT] Ignored Delivery User message. User ID: <user_id>`.
 
 ## [1.12.0] - 2026-08-09
 
 ### Added & Changed
 - **Role-Based User Management (`authorized_users`)**:
-  - Implemented `AuthorizedUser` model and `authorized_users` database table storing user IDs, roles (`'admin'` or `'delivery'`), and timestamps.
-  - Super Admin (`1573531032`) has full access to all bot commands, configuration, database management, statistics, and user management.
-  - Seeded default Delivery Users (`1078400998`, `1858358195`).
-- **New Super Admin Commands**:
-  - `/user delivery add <telegram_user_id>`: Adds a delivery user.
-  - `/user delivery remove <telegram_user_id>`: Removes a delivery user.
-  - `/users`: Displays list of Super Admins and Delivery Users.
+  - Implemented `AuthorizedUser` model and `authorized_users` database table.
+  - Super Admin commands: `/user delivery add <user_id>`, `/user delivery remove <user_id>`, `/users`.
 
 ## [1.11.0] - 2026-08-09
 
 ### Added & Changed
-- **Customer Edited Order Message Handling**: Added `edited_message_handler` to monitor message edits in the Client Group (`filters.UpdateType.EDITED_MESSAGE`). When a customer edits an existing order message, the bot replies directly: `This order will be placed again manually wait for team`.
+- **Customer Edited Order Message Handling**: Direct reply: `This order will be placed again manually wait for team`.
 
 ## [1.10.0] - 2026-08-09
 
 ### Added & Changed
-- **Duplicate Order Prompt & Confirmation**: Interactive inline keyboard prompt (`⚠️ Duplicate Order Detected`) when a customer submits duplicate pending orders.
+- **Duplicate Order Prompt & Confirmation**: Interactive inline keyboard prompt (`⚠️ Duplicate Order Detected`).
 
 ## [1.9.0] - 2026-08-08
 
 ### Added & Changed
-- **Email as First Image Album Caption**: Email address set as caption of the **FIRST image** in delivered albums. No separate text message afterward.
+- **Email as First Image Album Caption**: Email address set as caption of the **FIRST image** in delivered albums.
 
 ## [1.8.0] - 2026-08-08
 
 ### Added & Changed
 - **Removed Delivery Summary Card**: Removed extra completion summary card.
-- **Caption Email Override**: Support for extracting email overrides from Loader reply captions.
 - **Wrong Details Workflow**: Support for Loader text reply `wrong` to notify customer.
 
 ## [1.7.0] - 2026-08-08

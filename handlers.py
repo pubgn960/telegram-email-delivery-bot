@@ -3,7 +3,7 @@ Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
 Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
-Ignore Super Admin & Delivery User Messages in Client Group,
+Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS and AUTH_USERS_CACHE for zero-database-query filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH]).
@@ -326,6 +326,7 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
     Validates group ID strictly using in-memory BOT_SETTINGS cache without querying database.
     Enforces Role-Based Permission Check (User must have 'delivery' or 'admin' role).
     Validates that incoming text or media is sent strictly as a reply to a valid bot Order Message.
+    Ignores non-reply messages and unmatched replies silently without sending error cards in chat.
     Supports Wrong Details Workflow ('wrong' text reply) and Caption Email Overrides.
     """
     message = update.effective_message
@@ -359,16 +360,9 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     reply_to = message.reply_to_message
 
-    # Rule 1: Message MUST be a reply
+    # Rule 1: Message MUST be a reply - Silent Ignore without error messages in chat
     if not reply_to:
-        logger.warning(f"[LOADER] Reply failed: Loader message {message.message_id} in Loader Group is not a reply to an order.")
-        try:
-            await message.reply_text(
-                "❌ Please reply to the original order message.",
-                reply_to_message_id=message.message_id
-            )
-        except Exception as e:
-            logger.error(f"[LOADER] Failed to send non-reply rejection message: {e}")
+        logger.info("[LOADER] Ignored non-reply message.")
         return
 
     text_content = message.text or message.caption or ""
@@ -381,15 +375,9 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         if order_id_from_text:
             order = await get_order_by_id(order_id_from_text)
 
+    # Silent Ignore if reply does not match any valid order in DB
     if not order:
-        logger.warning(f"[LOADER] Reply failed: Could not match replied message {reply_to.message_id} to any Order in DB.")
-        try:
-            await message.reply_text(
-                "❌ Please reply to the original order message.",
-                reply_to_message_id=message.message_id
-            )
-        except Exception as e:
-            logger.error(f"[LOADER] Failed to send un-matched order rejection message: {e}")
+        logger.info("[LOADER] Ignored reply that does not match any active order.")
         return
 
     # Wrong Details Workflow: Check if loader reply contains the word 'wrong' (case-insensitive)
