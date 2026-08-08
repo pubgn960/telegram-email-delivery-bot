@@ -1,6 +1,6 @@
 # Telegram Email Image Delivery Bot (v1.0.0) 🚀
 
-[![Python CI](https://github.com/YOUR-USERNAME/telegram-email-delivery-bot/actions/workflows/python.yml/badge.svg)](https://github.com/YOUR-USERNAME/telegram-email-delivery-bot/actions/workflows/python.yml)
+[![Python CI](https://github.com/pubgn960/telegram-email-delivery-bot/actions/workflows/python.yml/badge.svg)](https://github.com/pubgn960/telegram-email-delivery-bot/actions/workflows/python.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Railway Deploy](https://railway.app/button.svg)](https://railway.app/)
@@ -86,7 +86,7 @@ Create a `.env` file based on `.env.example`:
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/YOUR-USERNAME/telegram-email-delivery-bot.git
+git clone https://github.com/pubgn960/telegram-email-delivery-bot.git
 cd telegram-email-delivery-bot
 ```
 
@@ -122,7 +122,7 @@ python main.py
    git add .
    git commit -m "Initial commit: Telegram Email Image Delivery Bot v1.0.0"
    git branch -M main
-   git remote add origin https://github.com/YOUR-USERNAME/telegram-email-delivery-bot.git
+   git remote add origin https://github.com/pubgn960/telegram-email-delivery-bot.git
    git push -u origin main
    ```
 
