@@ -1,12 +1,15 @@
 """
-Database manager providing asynchronous SQLAlchemy session management and queries.
-Supports both SQLite and PostgreSQL natively via DATABASE_URL config.
+Database manager providing asynchronous SQLAlchemy session management, CRUD operations,
+SHA256 fingerprint deduplication, CSV export, backup, and restore helpers.
 """
 
+import os
+import shutil
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple, Dict, Any
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
@@ -15,14 +18,14 @@ from models import Base, Order, Image
 
 logger = logging.getLogger(__name__)
 
-# Create SQLAlchemy Async Engine
+# SQLAlchemy Async Engine initialization
 engine = create_async_engine(
     Config.DATABASE_URL,
     echo=False,
     future=True
 )
 
-# Async Session Factory
+# Async Session Maker
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -30,79 +33,105 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+def compute_fingerprint(email: str, file_ids: List[str]) -> str:
+    """
+    Computes a unique SHA256 fingerprint for an upload.
+    Formula: SHA256(email + image_count + sorted_file_ids)
+
+    Args:
+        email (str): Target normalized email address.
+        file_ids (List[str]): List of Telegram file_id strings.
+
+    Returns:
+        str: 64-character SHA256 hex string.
+    """
+    email_clean = email.lower().strip()
+    count_str = str(len(file_ids))
+    sorted_ids = "".join(sorted(file_ids))
+    raw_payload = f"{email_clean}:{count_str}:{sorted_ids}"
+    return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+
+
 async def init_db() -> None:
-    """Initializes the database by creating all declared tables if they do not exist."""
+    """Initializes the database schema."""
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database initialized successfully.")
 
 
-async def save_order(email: str, file_ids: List[str], media_group_id: Optional[str] = None) -> Tuple[Optional[Order], bool]:
+async def save_order(
+    email: str,
+    file_items: List[Tuple[str, str]],
+    media_group_id: Optional[str] = None
+) -> Tuple[Optional[Order], bool]:
     """
-    Saves a new Order along with its associated image file IDs.
-    Handles duplicate media groups gracefully.
+    Saves a new Order and images using SHA256 fingerprint duplicate suppression.
 
     Args:
-        email (str): The normalized recipient email.
-        file_ids (List[str]): List of Telegram photo file_ids in order.
-        media_group_id (str, optional): Telegram media_group_id if part of an album.
+        email (str): Recipient email.
+        file_items (List[Tuple[str, str]]): List of (file_id, file_type) tuples.
+        media_group_id (str, optional): Media group identifier.
 
     Returns:
-        Tuple[Optional[Order], bool]: (Saved Order object or None, is_duplicate boolean)
+        Tuple[Optional[Order], bool]: (Saved Order, is_duplicate)
     """
-    if not file_ids:
-        logger.warning("Attempted to save order with no images. Aborting.")
+    if not file_items:
         return None, False
+
+    email_clean = email.lower().strip()
+    file_ids = [item[0] for item in file_items]
+    fingerprint = compute_fingerprint(email_clean, file_ids)
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Check duplicate media group if media_group_id is present
+            # Check 1: Fingerprint duplicate check
+            fp_stmt = select(Order).where(Order.fingerprint == fingerprint)
+            fp_res = await session.execute(fp_stmt)
+            if fp_res.scalar_one_or_none():
+                logger.info(f"Duplicate upload detected via SHA256 fingerprint ({fingerprint[:10]}...). Skipped.")
+                return None, True
+
+            # Check 2: Media group ID duplicate check
             if media_group_id:
-                stmt = select(Order).where(Order.media_group_id == media_group_id)
-                result = await session.execute(stmt)
-                existing = result.scalar_one_or_none()
-                if existing:
-                    logger.info(f"Duplicate Media Group '{media_group_id}' skipped.")
-                    return existing, True
+                mg_stmt = select(Order).where(Order.media_group_id == media_group_id)
+                mg_res = await session.execute(mg_stmt)
+                if mg_res.scalar_one_or_none():
+                    logger.info(f"Duplicate upload detected via media_group_id ({media_group_id}). Skipped.")
+                    return None, True
 
             # Create new order
             new_order = Order(
-                email=email.lower().strip(),
+                email=email_clean,
                 media_group_id=media_group_id,
+                fingerprint=fingerprint,
                 created_at=datetime.now(timezone.utc)
             )
             session.add(new_order)
-            await session.flush()  # Obtain order.id
+            await session.flush()  # Populate order.id
 
-            # Create Image entries maintaining position order
-            for idx, file_id in enumerate(file_ids):
+            # Add Image records
+            for idx, (file_id, file_type) in enumerate(file_items):
                 img = Image(
                     order_id=new_order.id,
                     telegram_file_id=file_id,
+                    file_type=file_type,
                     position=idx
                 )
                 session.add(img)
 
         # Reload with images eagerly loaded
-        stmt = select(Order).options(joinedload(Order.images)).where(Order.id == new_order.id)
-        res = await session.execute(stmt)
+        res = await session.execute(
+            select(Order).options(joinedload(Order.images)).where(Order.id == new_order.id)
+        )
         saved_order = res.unique().scalar_one()
 
-        logger.info(f"New album saved for email: {email} | Images: {len(file_ids)} | Order ID: {saved_order.id}")
+        logger.info(f"New Order saved | ID: {saved_order.id} | Email: {email_clean} | Images: {len(file_items)}")
         return saved_order, False
 
 
 async def get_newest_order_by_email(email: str) -> Optional[Order]:
-    """
-    Retrieves the newest Order matching the specified email address, with images eagerly loaded.
-
-    Args:
-        email (str): Target email address.
-
-    Returns:
-        Optional[Order]: Matching Order or None if not found.
-    """
+    """Retrieves newest Order for email with images loaded."""
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
         stmt = (
@@ -117,15 +146,7 @@ async def get_newest_order_by_email(email: str) -> Optional[Order]:
 
 
 async def get_all_orders_by_email(email: str) -> List[Order]:
-    """
-    Retrieves all Orders matching the specified email address.
-
-    Args:
-        email (str): Target email address.
-
-    Returns:
-        List[Order]: List of Order records.
-    """
+    """Retrieves all Orders for email."""
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
         stmt = (
@@ -138,29 +159,45 @@ async def get_all_orders_by_email(email: str) -> List[Order]:
         return list(result.unique().scalars().all())
 
 
+async def mark_order_delivered(order_id: int) -> None:
+    """Updates delivered_at timestamp for an order."""
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = (
+                update(Order)
+                .where(Order.id == order_id)
+                .values(delivered_at=datetime.now(timezone.utc))
+            )
+            await session.execute(stmt)
+            logger.info(f"Order {order_id} marked as delivered.")
+
+
+async def get_pending_orders() -> List[Order]:
+    """Retrieves all orders that have not yet been delivered (delivered_at IS NULL)."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Order)
+            .options(joinedload(Order.images))
+            .where(Order.delivered_at.is_(None))
+            .order_by(Order.created_at.desc())
+        )
+        result = await session.execute(stmt)
+        return list(result.unique().scalars().all())
+
+
 async def delete_orders_by_email(email: str) -> int:
-    """
-    Deletes all records associated with a specific email address.
-
-    Args:
-        email (str): Target email address.
-
-    Returns:
-        int: Number of deleted order records.
-    """
+    """Deletes all orders matching email."""
     email_clean = email.lower().strip()
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # Get orders to delete
             stmt = select(Order.id).where(Order.email == email_clean)
             res = await session.execute(stmt)
-            order_ids = list(res.scalars().all())
+            ids = list(res.scalars().all())
 
-            if not order_ids:
+            if not ids:
                 return 0
 
-            # Delete orders (Cascades to images)
-            del_stmt = delete(Order).where(Order.id.in_(order_ids))
+            del_stmt = delete(Order).where(Order.id.in_(ids))
             result = await session.execute(del_stmt)
             count = result.rowcount
             logger.info(f"Deleted {count} order(s) for email: {email_clean}")
@@ -168,49 +205,62 @@ async def delete_orders_by_email(email: str) -> int:
 
 
 async def get_stats() -> Dict[str, Any]:
-    """
-    Computes system statistics for the /stats command dashboard.
-
-    Returns:
-        Dict[str, Any]: Dictionary of stats including orders, images, unique emails.
-    """
+    """Computes bot statistics dashboard."""
     async with AsyncSessionLocal() as session:
-        total_orders_res = await session.execute(select(func.count(Order.id)))
-        total_orders = total_orders_res.scalar() or 0
-
-        total_images_res = await session.execute(select(func.count(Image.id)))
-        total_images = total_images_res.scalar() or 0
-
-        unique_emails_res = await session.execute(select(func.count(func.distinct(Order.email))))
-        unique_emails = unique_emails_res.scalar() or 0
-
-        oldest_res = await session.execute(select(func.min(Order.created_at)))
-        oldest_date = oldest_res.scalar()
+        total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
+        total_images = (await session.execute(select(func.count(Image.id)))).scalar() or 0
+        unique_emails = (await session.execute(select(func.count(func.distinct(Order.email))))).scalar() or 0
+        pending_orders = (await session.execute(select(func.count(Order.id)).where(Order.delivered_at.is_(None)))).scalar() or 0
+        oldest_date = (await session.execute(select(func.min(Order.created_at)))).scalar()
 
         return {
             "total_orders": total_orders,
             "total_images": total_images,
             "unique_emails": unique_emails,
+            "pending_orders": pending_orders,
             "oldest_order_date": oldest_date.strftime("%Y-%m-%d %H:%M:%S UTC") if oldest_date else "N/A"
         }
 
 
 async def cleanup_old_records(days: int) -> int:
-    """
-    Deletes records older than the specified number of days.
-
-    Args:
-        days (int): Retention period threshold in days.
-
-    Returns:
-        int: Number of deleted records.
-    """
+    """Deletes orders older than days threshold."""
+    if days <= 0:
+        return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     async with AsyncSessionLocal() as session:
         async with session.begin():
             stmt = delete(Order).where(Order.created_at < cutoff)
-            result = await session.execute(stmt)
-            count = result.rowcount
+            res = await session.execute(stmt)
+            count = res.rowcount
             if count > 0:
-                logger.info(f"Automatic cleanup: Deleted {count} order(s) older than {days} days.")
+                logger.info(f"Storage Retention: Purged {count} order(s) older than {days} days.")
             return count
+
+
+async def export_orders_to_csv() -> str:
+    """
+    Generates CSV formatted string containing all orders export data.
+    Columns: Email, Images, Created, Delivered
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(Order).options(joinedload(Order.images)).order_by(Order.created_at.desc())
+        res = await session.execute(stmt)
+        orders = res.unique().scalars().all()
+
+        lines = ["Email,Images,Created,Delivered"]
+        for o in orders:
+            created_str = o.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            delivered_str = o.delivered_at.strftime("%Y-%m-%d %H:%M:%S") if o.delivered_at else "Pending"
+            lines.append(f'"{o.email}",{len(o.images)},"{created_str}","{delivered_str}"')
+
+        return "\n".join(lines)
+
+
+async def get_db_file_path() -> Optional[str]:
+    """Helper to get SQLite database file path if using SQLite."""
+    if Config.DATABASE_URL.startswith("sqlite"):
+        # e.g. sqlite+aiosqlite:///bot_database.db -> bot_database.db
+        path = Config.DATABASE_URL.split("///")[-1]
+        if os.path.exists(path):
+            return path
+    return None

@@ -1,14 +1,13 @@
 """
-Media Group Collector module for debouncing and buffering Telegram photo albums.
-Telegram sends albums as separate Update messages sharing a media_group_id.
-This collector buffers these items, waits until the album is complete, extracts the email,
-and saves the result to the database.
+Media Group Collector module supporting debouncing, user session fallback (5-min window),
+photo documents, and SHA256 fingerprint duplicate suppression.
 """
 
+import time
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Any
-from telegram import Message, PhotoSize
+from typing import Dict, List, Optional, Tuple, Any, Set
+from telegram import Message, PhotoSize, Document
 
 from config import Config
 from email_parser import extract_email
@@ -17,110 +16,173 @@ from database import save_order
 logger = logging.getLogger(__name__)
 
 
+class UserSessionManager:
+    """
+    Tracks recent email addresses submitted by users in the Source Group.
+    Allows photo messages sent within 5 minutes (300s) to be automatically
+    associated with the user's active session email.
+    """
+
+    def __init__(self, timeout: float = Config.USER_SESSION_TIMEOUT):
+        self.timeout = timeout
+        # Structure: user_id -> (email, timestamp)
+        self._sessions: Dict[int, Tuple[str, float]] = {}
+
+    def update_session(self, user_id: int, email: str) -> None:
+        """Stores or updates the active email session for a Telegram user."""
+        if user_id and email:
+            self._sessions[user_id] = (email.lower().strip(), time.time())
+            logger.debug(f"User {user_id} session updated with email: {email}")
+
+    def get_session_email(self, user_id: int) -> Optional[str]:
+        """Retrieves active session email if created within the timeout window."""
+        if not user_id or user_id not in self._sessions:
+            return None
+
+        email, timestamp = self._sessions[user_id]
+        if time.time() - timestamp <= self.timeout:
+            logger.debug(f"Active session found for user {user_id}: {email}")
+            return email
+        else:
+            # Session expired
+            del self._sessions[user_id]
+            return None
+
+
+# Global session manager instance
+user_session_manager = UserSessionManager()
+
+
 class MediaGroupCollector:
     """
-    In-memory collector and debouncer for Telegram media groups (albums) and single photos.
+    In-memory debouncer and collector for Telegram photo albums and single photo/document messages.
     """
 
     def __init__(self, timeout: float = Config.MEDIA_GROUP_TIMEOUT):
         self.timeout = timeout
-        # Structure: media_group_id -> { "items": [(msg_id, file_id, caption)], "task": asyncio.Task }
+        # Structure: media_group_id -> { "items": [(msg_id, file_id, file_type, caption, user_id)], "task": Task }
         self._buffers: Dict[str, Dict[str, Any]] = {}
-        # Set of recently processed media_group_ids for memory caching duplicate checks
-        self._processed_cache: set = set()
+        self._processed_cache: Set[str] = set()
 
-    async def add_photo_message(self, message: Message) -> None:
+    async def add_media_message(self, message: Message) -> None:
         """
-        Processes an incoming message containing a photo.
-        Supports both Media Group (album) messages and single photo messages.
+        Processes an incoming photo or photo-document message.
 
         Args:
-            message (Message): Telegram message object containing photo(s).
+            message (Message): Telegram message object.
         """
-        if not message.photo:
+        file_id: Optional[str] = None
+        file_type: str = "photo"
+
+        # 1. Extract Photo or Photo-Document file_id
+        if message.photo:
+            # Highest resolution photo
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif message.document:
+            mime = message.document.mime_type or ""
+            if mime.startswith("image/"):
+                file_id = message.document.file_id
+                file_type = "document"
+
+        if not file_id:
             return
 
-        # Select highest resolution photo
-        highest_res_photo: PhotoSize = message.photo[-1]
-        file_id = highest_res_photo.file_id
         caption = message.caption or message.text or ""
         msg_id = message.message_id
         media_group_id = message.media_group_id
+        user_id = message.from_user.id if message.from_user else 0
 
-        # Case 1: Single Photo (No media group ID)
+        # 2. Check for Email in caption or fallback to active User Session
+        extracted_email = extract_email(caption)
+        if extracted_email:
+            user_session_manager.update_session(user_id, extracted_email)
+            email = extracted_email
+        else:
+            email = user_session_manager.get_session_email(user_id)
+
+        # Case A: Single Photo / Single Document (No media group)
         if not media_group_id:
-            email = extract_email(caption)
             if email:
-                logger.info(f"Single photo email detected: {email}")
-                _, is_dup = await save_order(email=email, file_ids=[file_id], media_group_id=None)
+                logger.info(f"Processing single {file_type} upload for email: {email}")
+                _, is_dup = await save_order(
+                    email=email,
+                    file_items=[(file_id, file_type)],
+                    media_group_id=None
+                )
                 if is_dup:
-                    logger.info(f"Duplicate single photo skipped for email: {email}")
+                    logger.info(f"Duplicate single {file_type} upload skipped for email: {email}")
             else:
-                logger.debug("Single photo received without valid email. Ignored.")
+                logger.debug("Single photo received without explicit email or active user session. Ignored.")
             return
 
-        # Case 2: Media Group (Album)
-        # Duplicate check against in-memory cache
+        # Case B: Media Group (Album)
         if media_group_id in self._processed_cache:
-            logger.info(f"Duplicate Media Group '{media_group_id}' received and skipped via cache.")
+            logger.info(f"Duplicate Media Group '{media_group_id}' skipped via in-memory cache.")
             return
 
-        # If existing buffer present, cancel pending processing task
+        # Buffer item
         if media_group_id in self._buffers:
             buf = self._buffers[media_group_id]
             if buf.get("task") and not buf["task"].done():
                 buf["task"].cancel()
-            buf["items"].append((msg_id, file_id, caption))
+            buf["items"].append((msg_id, file_id, file_type, caption, user_id))
+            if email and not buf.get("email"):
+                buf["email"] = email
         else:
             self._buffers[media_group_id] = {
-                "items": [(msg_id, file_id, caption)],
+                "items": [(msg_id, file_id, file_type, caption, user_id)],
+                "email": email,
                 "task": None
             }
 
-        # Schedule debounced process task
+        # Schedule debounced flush task
         task = asyncio.create_task(self._schedule_flush(media_group_id))
         self._buffers[media_group_id]["task"] = task
 
     async def _schedule_flush(self, media_group_id: str) -> None:
-        """Waits for timeout period before flushing accumulated album images to database."""
+        """Waits for debounce timeout before flushing media group to database."""
         try:
             await asyncio.sleep(self.timeout)
             await self._flush_media_group(media_group_id)
         except asyncio.CancelledError:
-            # Expected when new items are appended to the album
             pass
 
     async def _flush_media_group(self, media_group_id: str) -> None:
-        """Flushes buffered media group images, parses email, and saves to database."""
+        """Flushes buffered album, resolves email, checks fingerprint, and saves to database."""
         buf = self._buffers.pop(media_group_id, None)
-        if not buf:
+        if not buf or not buf.get("items"):
             return
 
-        items: List[Tuple[int, str, str]] = buf["items"]
-        if not items:
-            return
+        items: List[Tuple[int, str, str, str, int]] = buf["items"]
+        items.sort(key=lambda x: x[0])  # Sort by message_id to preserve original sequence
 
-        # Preserve image order by sorting items by message_id
-        items.sort(key=lambda x: x[0])
+        # Combine captions and check session emails
+        captions_combined = " ".join([it[3] for it in items if it[3]])
+        email = extract_email(captions_combined) or buf.get("email")
 
-        # Extract file_ids and combine all captions to find email
-        file_ids = [item[1] for item in items]
-        combined_text = " ".join([item[2] for item in items if item[2]])
-
-        email = extract_email(combined_text)
+        # Fallback check on user_id of first item in album
+        if not email and items:
+            first_user_id = items[0][4]
+            email = user_session_manager.get_session_email(first_user_id)
 
         if email:
-            logger.info(f"Media group '{media_group_id}' completed with {len(file_ids)} images. Email detected: {email}")
-            _, is_dup = await save_order(email=email, file_ids=file_ids, media_group_id=media_group_id)
+            file_items = [(it[1], it[2]) for it in items]
+            logger.info(f"Flushing Media Group '{media_group_id}' with {len(file_items)} items for email: {email}")
+            _, is_dup = await save_order(
+                email=email,
+                file_items=file_items,
+                media_group_id=media_group_id
+            )
             if is_dup:
                 logger.info(f"Duplicate Media Group '{media_group_id}' skipped.")
-            # Add to processed cache (keep cache bounded)
+
             self._processed_cache.add(media_group_id)
             if len(self._processed_cache) > 1000:
                 self._processed_cache.pop()
         else:
-            logger.warning(f"Media group '{media_group_id}' had {len(file_ids)} images but no valid email address was found in captions.")
+            logger.warning(f"Media Group '{media_group_id}' ({len(items)} items) could not be saved: No email detected.")
 
 
-# Singleton instance of MediaGroupCollector
+# Singleton collector instance
 media_collector = MediaGroupCollector()

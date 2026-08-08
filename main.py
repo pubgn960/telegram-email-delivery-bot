@@ -25,10 +25,14 @@ from handlers import (
     find_command,
     resend_command,
     delete_command,
-    stats_command
+    stats_command,
+    pending_command,
+    export_command,
+    backup_command,
+    restore_command
 )
 
-# Setup application logging
+# Initialize application logging
 setup_logging()
 logger = logging.getLogger("main")
 
@@ -38,13 +42,12 @@ async def post_init(application: Application) -> None:
     logger.info("Initializing database schema...")
     await init_db()
 
-    # Initial cleanup of stale records
-    if Config.MAX_STORAGE_DAYS > 0:
-        cleaned = await cleanup_old_records(Config.MAX_STORAGE_DAYS)
+    if Config.CLEANUP_DAYS > 0:
+        cleaned = await cleanup_old_records(Config.CLEANUP_DAYS)
         if cleaned > 0:
-            logger.info(f"Startup cleanup purged {cleaned} expired records.")
+            logger.info(f"Startup retention check purged {cleaned} expired records.")
 
-    logger.info("Bot initialization complete. Listening for updates...")
+    logger.info("Bot initialization complete. Active and listening for updates...")
 
 
 async def periodic_cleanup_task() -> None:
@@ -52,9 +55,9 @@ async def periodic_cleanup_task() -> None:
     while True:
         try:
             await asyncio.sleep(86400)  # 24 hours
-            if Config.MAX_STORAGE_DAYS > 0:
+            if Config.CLEANUP_DAYS > 0:
                 logger.info("Executing scheduled database retention cleanup...")
-                await cleanup_old_records(Config.MAX_STORAGE_DAYS)
+                await cleanup_old_records(Config.CLEANUP_DAYS)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -62,12 +65,12 @@ async def periodic_cleanup_task() -> None:
 
 
 def main() -> None:
-    """Configures and runs the Telegram Bot Application."""
+    """Configures and launches the Telegram Bot Application."""
     if not Config.BOT_TOKEN:
         logger.critical("BOT_TOKEN is missing! Please configure it in .env file or environment variables.")
         sys.exit(1)
 
-    logger.info("Starting Telegram Email Image Delivery Bot...")
+    logger.info("Starting Telegram Email Image Delivery Bot v1.0.0...")
 
     # Build python-telegram-bot application
     application = (
@@ -84,19 +87,21 @@ def main() -> None:
     application.add_handler(CommandHandler("resend", resend_command))
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("export", export_command))
+    application.add_handler(CommandHandler("backup", backup_command))
+    application.add_handler(CommandHandler("restore", restore_command))
 
-    # Register Source Group Handler (Photo/Media Group listener)
-    # Listens for photo messages
+    # Register Source Group Handler (Photos, Photo Documents, Text/Caption for user sessions)
     application.add_handler(
         MessageHandler(
-            filters.PHOTO & (~filters.COMMAND),
+            (filters.PHOTO | filters.Document.IMAGE | filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
             source_group_handler
         ),
         group=1
     )
 
-    # Register Delivery Group Handler (Text listener for emails)
-    # Listens for text or caption messages containing potential email addresses
+    # Register Delivery Group Handler (Text or Caption messages containing emails)
     application.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & (~filters.COMMAND),
@@ -105,11 +110,10 @@ def main() -> None:
         group=2
     )
 
-    # Start background retention cleanup loop in post_init event loop
+    # Start background retention loop
     loop = asyncio.get_event_loop()
     loop.create_task(periodic_cleanup_task())
 
-    # Run bot polling
     logger.info("Bot running in polling mode. Press Ctrl+C to stop.")
     application.run_polling(drop_pending_updates=True)
 
