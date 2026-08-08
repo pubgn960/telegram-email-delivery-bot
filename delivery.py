@@ -2,7 +2,7 @@
 Delivery engine handling media group aggregation, auto-splitting (max 10 items),
 dispatching image albums to the Client Group with Email as First Image Caption,
 Telegram API retries, database status updates, Loader confirmations, Telegram reactions,
-and Category A Only Price Workflow.
+and Category A Only Price Workflow in Client Group (client_chat_id & original_message_id).
 Includes structured logging tags ([DELIVERY], [REACTION], [PRICE]).
 """
 
@@ -88,9 +88,9 @@ async def deliver_order_by_id(
     Delivers stored image albums for an order to the Client Group, placing Email as the caption
     of the FIRST image in the album (no separate text message or summary card sent to customer),
     adds ❤️ reactions to original customer message and loader delivery message, and notifies Loader Group.
-    Supports Category A Only Price Workflow:
-    - Category A: Attaches '💰 Price' (or '✏️ Edit Price') button to loader delivery completion message.
-    - Category B: Attaches NO buttons, keeping existing Category B workflow unchanged.
+    Supports Category A Only Price Workflow in Client Group:
+    - Category A: Attaches '💰 Price' button in Client Group (client_chat_id & original_message_id).
+    - Category B: Attaches NO Price buttons, keeping existing Category B workflow unchanged.
     """
     order = await get_order_by_id(order_id)
 
@@ -221,7 +221,7 @@ async def deliver_order_by_id(
         else:
             logger.warning("Reaction not supported.")
 
-    # 4. Reaction On Loader Delivery Message (Add ❤️ reaction to Loader's delivery message in Loader Group)
+    # 4. Reaction On Loader Delivery Message & Plain Notice to Loader Group (NO Price UI in Loader Group!)
     target_loader_msg_id = loader_reply_msg_id or order.loader_message_id
     if loader_group_id and target_loader_msg_id:
         loader_reacted = await safe_set_message_reaction(
@@ -237,38 +237,38 @@ async def deliver_order_by_id(
         else:
             logger.warning("Reaction not supported.")
 
-        # Determine Group Category ('A' or 'B')
-        order_category = order.category or (CLIENT_GROUPS_CACHE.get(order.client_chat_id, "A") if order.client_chat_id else "A")
-
-        # Format loader delivery confirmation card
-        price_line = f"\n\n💰 <b>Price:</b> Rs.{order.price}" if order.price else ""
         loader_notice = (
-            f"📧 <b>Email</b>\n{html.escape(email_for_caption)}\n\n"
-            f"✅ <b>Delivery Completed</b>{price_line}"
+            f"✅ <b>DELIVERED</b>\n\n"
+            f"<b>Order ID:</b>\n#{order.id}\n\n"
+            f"<b>Images:</b>\n{total_images}\n\n"
+            f"<b>Delivered:</b>\n{now_str}"
         )
-
-        # Category A Only Price Workflow:
-        # Category A -> Show 💰 Price / ✏️ Edit Price button
-        # Category B -> Show NO buttons (keep Category B workflow unchanged)
-        keyboard = None
-        if order_category == "A":
-            if order.price:
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
-            else:
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
-
         try:
             await bot.send_message(
                 chat_id=loader_group_id,
                 text=loader_notice,
                 reply_to_message_id=target_loader_msg_id,
-                reply_markup=keyboard,
                 parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"[DELIVERY] Failed to send loader delivery confirmation: {e}")
 
-    # 5. Optional post-delivery cleanup
+    # 5. Category A Only Price Workflow in CLIENT GROUP (client_chat_id & original_message_id)
+    order_category = order.category or (CLIENT_GROUPS_CACHE.get(client_chat_id, "A") if client_chat_id else "A")
+    if order_category == "A" and client_chat_id:
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
+        try:
+            await bot.send_message(
+                chat_id=client_chat_id,
+                text="💰 Click below to set price:",
+                reply_to_message_id=order.original_message_id,
+                reply_markup=keyboard
+            )
+            logger.info(f"[PRICE] Category A Price button sent to Client Group {client_chat_id} for Order #{order.id}.")
+        except Exception as e:
+            logger.exception(f"[PRICE] Failed to send Price button to Client Group: {e}")
+
+    # 6. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:
         logger.info(f"DELETE_AFTER_DELIVERY enabled. Purging order #{order.id} for email: '{order.email}'")
         await delete_orders_by_email(order.email)

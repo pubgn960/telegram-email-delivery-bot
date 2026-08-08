@@ -5,23 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-08-09
+
+### Fixed & Changed
+- **Price Workflow Client Group Routing Fix (`delivery.py`, `handlers.py`)**:
+  - **Loader Group Isolation**: Loader Group receives **NO Price UI** (only plain delivery completion notice).
+  - **Client Group Routing**: All Price callbacks, prompts (`Enter order price:`), and final calculator price messages (`💰 Price: 2500`) are routed strictly to the **Client Group** (`order.client_chat_id` & `order.original_message_id`).
+  - **Calculator Bot Support**: Posts a **NEW message** in Client Group (`💰 Price: 2500`) instead of editing delivery messages.
+  - **Price Editing**: Price updates create a **NEW message** (`💰 Price: 3000`) so the external calculator bot can detect the latest value.
+
 ## [1.21.0] - 2026-08-09
 
 ### Added & Changed
 - **Category A Only Price Workflow (`models.py`, `database.py`, `delivery.py`, `handlers.py`, `main.py`)**:
   - Added `category` and `price` columns to `orders` database model.
-  - **Category A Delivery Completion**:
-    - After an order is delivered to customer, appends `[💰 Price]` inline button to delivery completion message in Loader Group ONLY for Category A orders.
-    - Category B orders show NO price buttons and maintain their existing workflow completely unchanged.
-  - **Interactive Admin Price Entry**:
-    - Clicking `💰 Price` prompts authorized admin: `Enter order price.`.
-    - Admin enters price (e.g. `2500`). Saves value to `orders.price`.
-    - Edits delivery completion message to display `💰 Price: Rs.2500` and changes inline button to `[✏️ Edit Price]`.
-  - **Editing Price**:
-    - Clicking `✏️ Edit Price` prompts admin for a new price, updates `orders.price` and delivery completion message (e.g. `💰 Price: Rs.2800`).
-  - **VERY IMPORTANT - Calculator Bot Reply**:
-    - Every time a price is entered or edited, the bot sends a **NEW reply message** to the delivery message containing **ONLY the raw numeric value** (e.g. `2500` or `2800`) so external calculator bots can read it automatically.
-    - Outputs structured log: `[PRICE]\nOrder #25\nPrice set to 2500` / `Calculator reply sent.`.
+  - Category A Delivery Completion with Price Workflow support.
 
 ## [1.20.0] - 2026-08-09
 
