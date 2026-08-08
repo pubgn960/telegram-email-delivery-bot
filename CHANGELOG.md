@@ -5,11 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-08
+
+### Added & Changed
+- **Exact Message Copying**: Bot copies customer messages from Client Group to Loader Group **EXACTLY** as received (`copy_message`), with zero added metadata, prefixes, suffixes, headers, footers, or emojis.
+- **Zero Visible Metadata**: Internal Order IDs, timestamps, and database metadata remain strictly internal and are never shown in forwarded messages.
+
 ## [1.4.0] - 2026-08-08
 
 ### Added & Changed
 - **Updated Reaction Rules**:
-  - `👍` reaction placed on the original customer message when order is received & forwarded (`[REACTION] 👍 Order received`).
+  - `👍` reaction placed on original customer message when order is received (`[REACTION] 👍 Order received`).
   - `❤️` reaction placed on loader reply message upon image processing (`[REACTION] ❤️ Loader delivery`).
   - `❤️` reaction placed on original customer order message when delivery is completed in Client Group (`[REACTION] ❤️ Customer delivery completed`).
 - **Reaction Failure Handling**: If reactions are not supported in a chat, logs `Reaction not supported.` and continues normal processing without stopping the workflow.

@@ -1,6 +1,6 @@
 """
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
-Implements Two-Group Reply-Based Workflow, Privacy Protection (No Customer Names exposed),
+Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Telegram Reaction handling (👍 order received, ❤️ delivery completed), and Admin Commands.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION]).
 """
@@ -64,7 +64,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Monitors messages in Group 1 (Client Group).
     When a customer sends an order message containing an email:
     1. Registers new Order in DB with status 'Pending'.
-    2. Formats and forwards Order Notification message to Group 2 (Loader Group) - Privacy Protected (No Customer Names).
+    2. Copies original customer message to Group 2 (Loader Group) EXACTLY as received (No added metadata/formatting).
     3. Adds 👍 reaction to original customer order message.
     """
     message = update.effective_message
@@ -97,10 +97,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     logger.info(f"[CLIENT] New order detected for email '{email}' in Client Group {chat.id} (Msg ID: {message.message_id})")
 
-    # Extract package description (NO customer name / username / user_id!)
     package_desc = extract_package(text_content)
-    email_escaped = html.escape(email)
-    pkg_escaped = html.escape(package_desc)
 
     # 1. Create Pending Order in DB
     order = await create_order(
@@ -110,34 +107,31 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         package=package_desc
     )
 
-    created_time_str = order.created_at.strftime("%Y-%m-%d %H:%M UTC")
-
-    # 2. Format Order Notification for Loader Group (Clean Privacy Format)
-    loader_order_text = (
-        f"📦 <b>NEW ORDER</b>\n\n"
-        f"<b>Order ID:</b>\n#{order.id}\n\n"
-        f"<b>Package:</b>\n{pkg_escaped}\n\n"
-        f"<b>Email:</b>\n{email_escaped}\n\n"
-        f"<b>Time:</b>\n{created_time_str}"
-    )
-
-    # 3. Post Order Notification to Loader Group
+    # 2. Copy Original Customer Message to Loader Group EXACTLY as received (Zero added metadata or headers)
     loader_group_id = settings.delivery_group_id
     if loader_group_id:
         try:
-            forwarded_msg = await context.bot.send_message(
-                chat_id=loader_group_id,
-                text=loader_order_text,
-                parse_mode="HTML"
-            )
+            try:
+                forwarded_msg = await context.bot.copy_message(
+                    chat_id=loader_group_id,
+                    from_chat_id=chat.id,
+                    message_id=message.message_id
+                )
+            except Exception as e_copy:
+                logger.debug(f"copy_message failed: {e_copy}. Fallback to raw text send_message.")
+                forwarded_msg = await context.bot.send_message(
+                    chat_id=loader_group_id,
+                    text=text_content
+                )
+
             await set_order_loader_message_id(order.id, forwarded_msg.message_id)
-            logger.info(f"[CLIENT] Order forwarded to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
+            logger.info(f"[CLIENT] Order copied to Loader Group {loader_group_id} (Order #{order.id}, Loader Msg ID: {forwarded_msg.message_id})")
         except Exception as e:
             logger.error(f"[CLIENT] Failed to post Order #{order.id} to Loader Group {loader_group_id}: {e}")
     else:
         logger.warning(f"[CLIENT] Order #{order.id} registered, but Loader Group is not configured yet!")
 
-    # 4. Add 👍 reaction to ORIGINAL customer order message
+    # 3. Add 👍 reaction to ORIGINAL customer order message
     reacted = await safe_set_message_reaction(
         bot=context.bot,
         chat_id=chat.id,
