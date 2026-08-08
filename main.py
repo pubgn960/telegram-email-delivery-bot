@@ -22,6 +22,7 @@ from database import init_db, cleanup_old_records, check_order_timeouts, reload_
 from utils import setup_logging
 from handlers import (
     source_group_handler,
+    edited_message_handler,
     delivery_group_handler,
     duplicate_order_callback_handler,
     start_command,
@@ -167,8 +168,17 @@ def main() -> None:
     # Register Client Group Handler (Group 1 - Customer Orders)
     application.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.CAPTION | filters.PHOTO) & (~filters.COMMAND),
+            (filters.TEXT | filters.CAPTION | filters.PHOTO) & (~filters.COMMAND) & (~filters.UpdateType.EDITED_MESSAGE),
             source_group_handler
+        ),
+        group=1
+    )
+
+    # Register Client Group Edited Message Handler (Group 1 - Customer Message Edits)
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.EDITED_MESSAGE & (~filters.COMMAND),
+            edited_message_handler
         ),
         group=1
     )

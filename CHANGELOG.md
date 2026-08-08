@@ -5,81 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-09
+
+### Added & Changed
+- **Customer Edited Order Message Handling**: Added `edited_message_handler` to monitor message edits in the Client Group (`filters.UpdateType.EDITED_MESSAGE`). When a customer edits an existing order message, the bot replies directly: `This order will be placed again manually wait for team`.
+
 ## [1.10.0] - 2026-08-09
 
 ### Added & Changed
-- **Duplicate Order Prompt & Confirmation**: When a customer submits an order in the Client Group while a previous order for the same email is still pending, the bot sends an interactive inline prompt:
-  ```text
-  ⚠️ Duplicate Order Detected
-
-  Would you like to place this order again, or was it sent by mistake?
-
-  Buttons:
-  [✅ Place Again]  [❌ Cancel]
-  ```
-- **Interactive Callbacks**: Tapping `✅ Place Again` confirms the order and copies it to the Loader Group. Tapping `❌ Cancel` cancels the duplicate order.
+- **Duplicate Order Prompt & Confirmation**: When a customer submits an order in the Client Group while a previous order for the same email is still pending, the bot sends an interactive inline prompt (`⚠️ Duplicate Order Detected`).
 
 ## [1.9.0] - 2026-08-08
 
 ### Added & Changed
-- **Email as First Image Album Caption**: When delivering image albums to the customer in the Client Group:
-  - If the Loader's reply caption contains valid email addresses, `extract_last_email()` extracts the last valid email and sets it as the caption of the **FIRST image** in the album.
-  - If no email is present in the Loader caption, the original order email from the database (`order.email`) is set as the caption of the **FIRST image**.
-  - All remaining images in the album have no caption.
-  - No separate text message or delivery summary card is sent to the customer afterward.
+- **Email as First Image Album Caption**: When delivering image albums to the customer in the Client Group, the email address is set as the caption of the **FIRST image** in the album. No separate text message is sent afterward.
 
 ## [1.8.0] - 2026-08-08
 
 ### Added & Changed
-- **Removed Delivery Summary Card**: Removed the extra completion summary card (`📧 Email ... 📦 Order ID ... ✅ Delivery Completed`) sent after image delivery. Customers receive only images/album and caption email override (if present).
-- **Caption Email Override**: If the Loader's reply text/caption contains valid email addresses, `extract_last_email()` extracts the last valid email.
-- **Wrong Details Workflow**: When the Loader replies to an order with text or caption containing the word `wrong` (case-insensitive):
-  - Sends `❌ Please check and correct your details, then send them again.` to the customer in the Client Group (replying to customer's order).
-  - Reacts to the Loader's message with `❌` (fallback `⚠️`).
-  - Keeps order status as `Pending` without delivering images or deleting records.
+- **Removed Delivery Summary Card**: Removed extra completion summary card.
+- **Caption Email Override**: Support for extracting email overrides from Loader reply captions.
+- **Wrong Details Workflow**: Support for Loader text reply `wrong` to notify customer (`❌ Please check and correct your details, then send them again.`).
 
 ## [1.7.0] - 2026-08-08
 
 ### Refactored & Changed
-- **Global In-Memory `BOT_SETTINGS` Cache**: Refactored group configuration system to eliminate per-message database queries. Incoming updates in `source_group_handler` and `delivery_group_handler` validate group IDs strictly in RAM using `BOT_SETTINGS["source_group_id"]` and `BOT_SETTINGS["delivery_group_id"]`.
-- **Startup Settings Pre-loading**: Added `reload_bot_settings_cache()` in `post_init()`, loading settings from database once during bot startup. Added `[CACHE]` startup logs (`Source Group Loaded: ...`, `Delivery Group Loaded: ...`, or `No groups configured.`).
+- **Global In-Memory `BOT_SETTINGS` Cache**: Zero-database-query message filtering in RAM.
 
 ## [1.6.0] - 2026-08-08
 
 ### Added & Changed
-- **Keyword-Based Order Detection**: Messages in Client Group are checked against a dedicated keyword list in `keywords.py`. Only messages containing at least one order keyword (`.com`, `.co`, `.net`, `.org`, `.pk`, `.io`, `.gg`, `gmail`, `gma`, `hotmail`, `hotmail.com`, `outlook`, `outlook.com`, `yahoo`, `icloud`, `proton`, `+`, `email`) are forwarded. All non-matching messages are ignored completely.
+- **Keyword-Based Order Detection**: Configurable keyword list in `keywords.py`.
 
 ## [1.5.0] - 2026-08-08
 
 ### Added & Changed
-- **Exact Message Copying**: Bot copies customer messages from Client Group to Loader Group **EXACTLY** as received (`copy_message`), with zero added metadata, prefixes, suffixes, headers, footers, or emojis.
+- **Exact Message Copying**: `copy_message` without added metadata.
 
 ## [1.4.0] - 2026-08-08
 
 ### Added & Changed
-- **Updated Reaction Rules**: `👍` reaction placed on original customer message on order received (`[REACTION] 👍 Order received`), `❤️` reaction placed on loader reply message (`[REACTION] ❤️ Loader delivery`), `❤️` reaction placed on customer message upon delivery completion (`[REACTION] ❤️ Customer delivery completed`).
+- **Updated Reaction Rules**: `👍` on order received, `❤️` on loader reply, `❤️` on customer delivery.
 
 ## [1.3.0] - 2026-08-08
 
 ### Added & Changed
-- **Privacy Protection**: Completely removed customer Telegram names, usernames, first/last names, and User IDs from all bot messages.
+- **Privacy Protection**: Removed customer names/usernames.
 
 ## [1.2.0] - 2026-08-08
 
 ### Added & Changed
-- **Two-Group Architecture**: Restructured bot workflow into Group 1 (**Client Group**) for customer orders and Group 2 (**Loader Group**) for automated order forwarding and loader image replies.
+- **Two-Group Architecture**: Group 1 (Client Group) and Group 2 (Loader Group).
 
 ## [1.1.0] - 2026-08-08
 
 ### Added & Changed
-- **Reply-Based Delivery Workflow**: Switched from searching email text in loader messages to explicit Reply-Based Order Mapping.
-- **Zero Group ID Environment Variables**: Complete self-configuration via `/source` and `/delivery` Telegram commands without Railway `.env` edits.
+- **Reply-Based Delivery Workflow**: Explicit Reply-Based Order Mapping.
 
 ## [1.0.0] - 2026-08-08
 
 ### Added
-- **Source Group Listener**: Automated collection of single photos and Telegram Media Groups (albums).
-- **Email Parser**: Regex-based email detection.
-- **Media Group Debouncer**: In-memory album buffering and ordering preservation.
-- **Database Engine**: SQLAlchemy 2.0 Async layer supporting both SQLite (`aiosqlite`) and PostgreSQL (`asyncpg`).
-- **Railway Deployment**: Full configuration including `Procfile`, `railway.json`, and `runtime.txt`.
+- **Initial Bot Release**: SQLAlchemy 2.0 Async layer, Railway deployment configuration.

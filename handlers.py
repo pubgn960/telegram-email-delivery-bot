@@ -2,7 +2,7 @@
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
-Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Telegram Reactions, and Admin Commands.
+Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling, Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS cache for zero-database-query message filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP]).
 """
@@ -184,6 +184,31 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info("[REACTION] 👍 Order received")
     else:
         logger.warning("Reaction not supported.")
+
+
+async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Monitors edited messages in Group 1 (Client Group).
+    When a customer edits their order message, informs the customer that the order will be placed manually.
+    """
+    message = update.edited_message or update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return
+
+    configured_client_id = BOT_SETTINGS["source_group_id"]
+    if not configured_client_id or chat.id != configured_client_id:
+        return
+
+    logger.info(f"[CLIENT] Customer edited message {message.message_id} in Client Group {chat.id}.")
+
+    reply_text = "This order will be placed again manually wait for team"
+    try:
+        await message.reply_text(reply_text, reply_to_message_id=message.message_id)
+        logger.info(f"[CLIENT] Sent manual placement notice to customer for edited message {message.message_id}.")
+    except Exception as e:
+        logger.error(f"[CLIENT] Failed to send manual placement notice for edited message: {e}")
 
 
 async def duplicate_order_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
