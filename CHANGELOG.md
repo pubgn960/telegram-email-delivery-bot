@@ -5,22 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-08-09
+
+### Fixed & Changed
+- **Telegram BotCommand Menu Registration Fix**:
+  - Replaced uppercase commands in `BotCommand` registration (`"A"` and `"B"`) with lowercase commands (`"a"` and `"b"`) to comply with Telegram API rules.
+  - Retained full backward compatibility for command handlers accepting both lowercase and uppercase aliases: `CommandHandler(["a", "A"], category_a_command)` and `CommandHandler(["b", "B"], category_b_command)`.
+  - Added pre-registration validation (`validate_bot_command`) verifying command names match `^[a-z0-9_]{1,32}$` and descriptions match `1 <= len <= 256`.
+  - Improved command registration exception logging with `logger.exception("[COMMANDS] Failed to register bot commands.")` for full stack trace visibility.
+  - Cleaned up Telegram `/` popup menu to display only 19 primary commands while keeping maintenance commands functional via direct typing.
+
 ## [1.17.0] - 2026-08-09
 
 ### Added & Changed
 - **Multi-Loader Approval System (Category B v2)**:
-  - Implemented `Loader` declarative model and `loaders` database table storing `id`, `loader_name`, `group_id`, and `created_at`.
-  - Added global `LOADERS_CACHE` populated during startup in `post_init()`.
-  - **Category B Interactive Button Workflow**:
-    - Orders received from Category B groups (`/B`) set status to `Pending Approval` and trigger a review notification card in Payment Review Group (`-1004441603990`) with `[✅ Accept]` and `[❌ Reject]` inline buttons.
-    - **`[❌ Reject]`**: Updates DB `status="Rejected"` and edits card to `❌ Order Rejected`.
-    - **`[✅ Accept]`**: Edits card to `Select Loader` displaying dynamic inline buttons for each registered loader in DB + `[❌ Cancel]`.
-    - **Loader Selection**: Clicking a loader button copies the original customer message to that specific Loader Group, updates DB `loader_group_id`, `loader_message_id`, and sets `status="Pending"`. Edits card to `✅ Order Approved & Sent`.
-    - **`[❌ Cancel]`**: Reverts card to initial Accept / Reject buttons without changing order status.
-  - **Loader Management Commands**:
-    - `/loaderadd`: Interactive step wizard (`Send Loader Group ID` → `Send Loader Name` → `✅ Loader Added Successfully`) or direct arguments `/loaderadd <group_id> <name>`.
-    - `/loaderlist`: Lists all registered loaders (`1.\nPakistan Loader\n-1001234567890`).
-    - `/loaderremove <id>`: Deletes loader by ID (`✅ Loader Removed`).
+  - Implemented `Loader` declarative model and `loaders` database table.
+  - Category B interactive button workflow (`[✅ Accept]`, `[❌ Reject]`, `Select Loader` dynamic menu, `[❌ Cancel]`).
+  - Added `/loaderadd`, `/loaderlist`, and `/loaderremove` admin commands.
 
 ## [1.16.0] - 2026-08-09
 
@@ -32,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added & Changed
 - **Group Category Routing System (v1.2)**:
-  - Added `ClientGroup` model and `client_groups` database table storing `chat_id`, `group_name`, `category` (`'A'` or `'B'`), and timestamps.
+  - Added `ClientGroup` model and `client_groups` database table.
 
 ## [1.14.0] - 2026-08-09
 

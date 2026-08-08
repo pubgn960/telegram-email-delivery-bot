@@ -6,16 +6,20 @@ BOT_SETTINGS cache, Role-Based User Management (AUTH_USERS_CACHE, Super Admin, D
 Ignoring Super Admin & Delivery User messages in Client Group,
 Group Category Routing System (v1.2: Category A, Category B, Payment Review, Approve, Reject),
 Multi-Loader Approval System (Loader CRUD, LOADERS_CACHE, Multi-Loader Assignment),
+Telegram BotCommand Validation (validate_bot_command),
 and two-group reply-based DB operations.
 """
 
 import unittest
 import asyncio
+from telegram import BotCommand
+
 from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
 from keywords import contains_order_keyword
 from delivery import chunk_list
 from media_collector import user_session_manager
 from utils import is_super_admin, is_delivery_user
+from main import validate_bot_command
 from database import (
     BOT_SETTINGS,
     AUTH_USERS_CACHE,
@@ -55,6 +59,26 @@ from database import (
     update_delivery_group,
     reset_groups
 )
+
+
+class TestBotCommandValidation(unittest.TestCase):
+    """Tests validate_bot_command against Telegram API rules."""
+
+    def test_valid_commands(self):
+        self.assertTrue(validate_bot_command(BotCommand("a", "Set Category A")))
+        self.assertTrue(validate_bot_command(BotCommand("b", "Set Category B")))
+        self.assertTrue(validate_bot_command(BotCommand("loaderadd", "Add Loader")))
+        self.assertTrue(validate_bot_command(BotCommand("loader_list", "List Loaders")))
+
+    def test_invalid_commands(self):
+        # Uppercase not allowed
+        self.assertFalse(validate_bot_command(BotCommand("A", "Set Category A")))
+        self.assertFalse(validate_bot_command(BotCommand("B", "Set Category B")))
+        # Spaces or special chars not allowed
+        self.assertFalse(validate_bot_command(BotCommand("loader-add", "Add Loader")))
+        self.assertFalse(validate_bot_command(BotCommand("loader add", "Add Loader")))
+        # Empty description not allowed
+        self.assertFalse(validate_bot_command(BotCommand("a", "")))
 
 
 class TestMultiLoaderManagement(unittest.IsolatedAsyncioTestCase):

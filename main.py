@@ -1,10 +1,11 @@
 """
 Main entry point for Telegram Email Image Delivery Bot.
-Initializes database, configures handlers, sets Telegram '/' UI command menu,
+Initializes database, configures handlers, sets Telegram '/' UI command menu with command validation,
 populates global in-memory BOT_SETTINGS, AUTH_USERS_CACHE, CLIENT_GROUPS_CACHE, and LOADERS_CACHE on startup,
 starts background tasks, and runs bot polling.
 """
 
+import re
 import sys
 import asyncio
 import logging
@@ -68,6 +69,20 @@ setup_logging()
 logger = logging.getLogger("main")
 
 
+def validate_bot_command(cmd: BotCommand) -> bool:
+    """
+    Validates a Telegram BotCommand against Telegram API rules:
+    - Name: lowercase letters (a-z), digits (0-9), underscore (_), length 1-32.
+    - Description: length 1-256.
+    """
+    name_pattern = r'^[a-z0-9_]{1,32}$'
+    if not re.match(name_pattern, cmd.command):
+        return False
+    if not (1 <= len(cmd.description) <= 256):
+        return False
+    return True
+
+
 async def periodic_maintenance_task() -> None:
     """Background task running every hour for order timeouts and 24h database retention cleanup."""
     while True:
@@ -97,42 +112,41 @@ async def post_init(application: Application) -> None:
     await reload_auth_users_cache()
     await reload_loaders_cache()
 
-    # Register Bot Commands list so Telegram displays them in the interactive '/' popup menu
-    commands = [
-        BotCommand("source", "Mark current group as Client Group"),
-        BotCommand("delivery", "Mark current group as Loader Group"),
-        BotCommand("paymentgroup", "Mark group as Payment Review Group"),
-        BotCommand("A", "Set Client Group to Category A (Trusted)"),
-        BotCommand("B", "Set Client Group to Category B (Payment Review)"),
-        BotCommand("category", "View current group category"),
-        BotCommand("removecategory", "Remove group category"),
-        BotCommand("loaderadd", "Add a new Loader Group"),
-        BotCommand("loaderlist", "List all registered Loaders"),
-        BotCommand("loaderremove", "Remove a registered Loader"),
-        BotCommand("approve", "Approve Category B order"),
-        BotCommand("reject", "Reject Category B order"),
-        BotCommand("groups", "Show group configuration status"),
-        BotCommand("status", "View bot status & diagnostics"),
-        BotCommand("user", "Manage delivery users"),
-        BotCommand("users", "List all authorized users"),
-        BotCommand("setup", "View setup guide"),
-        BotCommand("pending", "List pending orders"),
-        BotCommand("delivered", "List latest delivered orders"),
-        BotCommand("find", "Find order by ID or email"),
-        BotCommand("order", "Display detailed order information"),
-        BotCommand("cancel", "Cancel a pending order"),
-        BotCommand("resend", "Re-deliver order images"),
-        BotCommand("stats", "View bot statistics dashboard"),
-        BotCommand("help", "List all admin commands"),
-        BotCommand("export", "Export CSV data report"),
-        BotCommand("backup", "Download SQLite database backup"),
-        BotCommand("restore", "Restore SQLite database from backup")
+    # Register Clean & Frequently Used Bot Commands for Telegram '/' menu UI
+    raw_commands = [
+        BotCommand("start", "Start Bot"),
+        BotCommand("help", "Help"),
+        BotCommand("setup", "Setup Guide"),
+        BotCommand("source", "Set Client Group"),
+        BotCommand("delivery", "Set Loader Group"),
+        BotCommand("paymentgroup", "Set Payment Review Group"),
+        BotCommand("a", "Set Category A"),
+        BotCommand("b", "Set Category B"),
+        BotCommand("category", "View Group Category"),
+        BotCommand("loaderadd", "Add Loader"),
+        BotCommand("loaderlist", "List Loaders"),
+        BotCommand("loaderremove", "Remove Loader"),
+        BotCommand("user", "Manage Delivery Users"),
+        BotCommand("users", "List Authorized Users"),
+        BotCommand("groups", "Group Configuration"),
+        BotCommand("status", "Bot Status"),
+        BotCommand("pending", "Pending Orders"),
+        BotCommand("find", "Find Order"),
+        BotCommand("stats", "Statistics")
     ]
+
+    valid_commands = []
+    for cmd in raw_commands:
+        if validate_bot_command(cmd):
+            valid_commands.append(cmd)
+        else:
+            logger.warning(f"[COMMANDS] Skipping invalid BotCommand name='{cmd.command}' desc='{cmd.description}'")
+
     try:
-        await application.bot.set_my_commands(commands)
-        logger.info("Successfully registered bot commands for Telegram '/' menu UI.")
-    except Exception as e:
-        logger.warning(f"Failed to register '/' menu bot commands: {e}")
+        await application.bot.set_my_commands(valid_commands)
+        logger.info(f"[COMMANDS] Registered {len(valid_commands)} bot commands successfully.")
+    except Exception:
+        logger.exception("[COMMANDS] Failed to register bot commands.")
 
     # Initial order timeout check on startup
     expired = await check_order_timeouts(timeout_hours=24)
@@ -166,13 +180,13 @@ def main() -> None:
         .build()
     )
 
-    # Register Setup & Group Configuration Commands
+    # Register Setup & Group Configuration Commands (supporting both lowercase and uppercase aliases)
     application.add_handler(CommandHandler("setup", setup_command))
     application.add_handler(CommandHandler("source", source_command))
     application.add_handler(CommandHandler("delivery", delivery_command))
     application.add_handler(CommandHandler("paymentgroup", paymentgroup_command))
-    application.add_handler(CommandHandler("A", category_a_command))
-    application.add_handler(CommandHandler("B", category_b_command))
+    application.add_handler(CommandHandler(["a", "A"], category_a_command))
+    application.add_handler(CommandHandler(["b", "B"], category_b_command))
     application.add_handler(CommandHandler("category", category_check_command))
     application.add_handler(CommandHandler("removecategory", remove_category_command))
     application.add_handler(CommandHandler("approve", approve_order_command))
@@ -192,7 +206,7 @@ def main() -> None:
     application.add_handler(CommandHandler("user", user_command))
     application.add_handler(CommandHandler("users", users_command))
 
-    # Register Core & New Admin Commands
+    # Register Core & Admin Commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("pending", pending_command))
