@@ -2,7 +2,7 @@
 Telegram Update Handlers for Telegram Email Image Delivery Bot.
 Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Message Copy without metadata),
 Telegram Reaction handling (👍 order received, ❤️ delivery completed), and Admin Commands.
-Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION]).
+Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [SOURCE], [DELIVERY_GROUP]).
 """
 
 import io
@@ -75,6 +75,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     settings = await get_current_settings()
     configured_client_id = settings.source_group_id
+
+    logger.info(f"[SOURCE] Loaded Source Group: {configured_client_id}")
 
     if not configured_client_id:
         logger.warning(f"[CLIENT] Client Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
@@ -160,6 +162,8 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     settings = await get_current_settings()
     configured_loader_id = settings.delivery_group_id
+
+    logger.info(f"[DELIVERY_GROUP] Loaded Delivery Group: {configured_loader_id}")
 
     if not configured_loader_id:
         logger.warning(f"[LOADER] Loader Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
@@ -299,7 +303,11 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat = update.effective_chat
     group_name = chat.title or "Client Group"
 
+    logger.info(f"[SOURCE] Saving Source Group: {chat.id}")
     settings = await update_source_group(chat.id, group_name)
+    logger.info("[SOURCE] Database updated successfully.")
+    logger.info(f"[SOURCE] Loaded Source Group: {settings.source_group_id}")
+
     title_escaped = html.escape(settings.source_group_title or group_name)
 
     reply_msg = (
@@ -321,7 +329,11 @@ async def delivery_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat = update.effective_chat
     group_name = chat.title or "Loader Group"
 
+    logger.info(f"[DELIVERY_GROUP] Saving Delivery Group: {chat.id}")
     settings = await update_delivery_group(chat.id, group_name)
+    logger.info("[DELIVERY_GROUP] Database updated successfully.")
+    logger.info(f"[DELIVERY_GROUP] Loaded Delivery Group: {settings.delivery_group_id}")
+
     title_escaped = html.escape(settings.delivery_group_title or group_name)
 
     reply_msg = (

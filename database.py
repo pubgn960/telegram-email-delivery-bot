@@ -101,20 +101,27 @@ async def get_current_settings() -> Settings:
 async def update_source_group(chat_id: int, title: str) -> Settings:
     """Updates the Source Group (Client Group) configuration in database."""
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Settings)
-            .where(Settings.id == 1)
-            .values(
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
+
+        if not settings:
+            settings = Settings(
+                id=1,
                 source_group_id=chat_id,
                 source_group_title=title,
+                delivery_group_id=None,
+                delivery_group_title=None,
                 updated_at=datetime.now(timezone.utc)
             )
-        )
-        await session.execute(stmt)
-        await session.commit()
+            session.add(settings)
+        else:
+            settings.source_group_id = chat_id
+            settings.source_group_title = title
+            settings.updated_at = datetime.now(timezone.utc)
 
-        res = await session.execute(select(Settings).where(Settings.id == 1))
-        settings = res.scalar_one()
+        await session.commit()
+        await session.refresh(settings)
         logger.info(f"Client Group updated in DB: ID={chat_id}, Title='{title}'")
         return settings
 
@@ -122,20 +129,27 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
 async def update_delivery_group(chat_id: int, title: str) -> Settings:
     """Updates the Delivery Group (Loader Group) configuration in database."""
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Settings)
-            .where(Settings.id == 1)
-            .values(
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
+
+        if not settings:
+            settings = Settings(
+                id=1,
+                source_group_id=None,
+                source_group_title=None,
                 delivery_group_id=chat_id,
                 delivery_group_title=title,
                 updated_at=datetime.now(timezone.utc)
             )
-        )
-        await session.execute(stmt)
-        await session.commit()
+            session.add(settings)
+        else:
+            settings.delivery_group_id = chat_id
+            settings.delivery_group_title = title
+            settings.updated_at = datetime.now(timezone.utc)
 
-        res = await session.execute(select(Settings).where(Settings.id == 1))
-        settings = res.scalar_one()
+        await session.commit()
+        await session.refresh(settings)
         logger.info(f"Loader Group updated in DB: ID={chat_id}, Title='{title}'")
         return settings
 
@@ -143,66 +157,51 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
 async def remove_source_group() -> Settings:
     """Removes Client Group configuration from database."""
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Settings)
-            .where(Settings.id == 1)
-            .values(
-                source_group_id=None,
-                source_group_title=None,
-                updated_at=datetime.now(timezone.utc)
-            )
-        )
-        await session.execute(stmt)
-        await session.commit()
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
 
-        res = await session.execute(select(Settings).where(Settings.id == 1))
-        settings = res.scalar_one()
-        logger.info("Client Group configuration removed from DB.")
-        return settings
+        if settings:
+            settings.source_group_id = None
+            settings.source_group_title = None
+            settings.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(settings)
+        return settings or await get_or_create_settings()
 
 
 async def remove_delivery_group() -> Settings:
     """Removes Loader Group configuration from database."""
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Settings)
-            .where(Settings.id == 1)
-            .values(
-                delivery_group_id=None,
-                delivery_group_title=None,
-                updated_at=datetime.now(timezone.utc)
-            )
-        )
-        await session.execute(stmt)
-        await session.commit()
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
 
-        res = await session.execute(select(Settings).where(Settings.id == 1))
-        settings = res.scalar_one()
-        logger.info("Loader Group configuration removed from DB.")
-        return settings
+        if settings:
+            settings.delivery_group_id = None
+            settings.delivery_group_title = None
+            settings.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(settings)
+        return settings or await get_or_create_settings()
 
 
 async def reset_groups() -> Settings:
     """Resets both Client and Loader Group configurations in database."""
     async with AsyncSessionLocal() as session:
-        stmt = (
-            update(Settings)
-            .where(Settings.id == 1)
-            .values(
-                source_group_id=None,
-                source_group_title=None,
-                delivery_group_id=None,
-                delivery_group_title=None,
-                updated_at=datetime.now(timezone.utc)
-            )
-        )
-        await session.execute(stmt)
-        await session.commit()
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
 
-        res = await session.execute(select(Settings).where(Settings.id == 1))
-        settings = res.scalar_one()
-        logger.info("All Group settings reset in DB.")
-        return settings
+        if settings:
+            settings.source_group_id = None
+            settings.source_group_title = None
+            settings.delivery_group_id = None
+            settings.delivery_group_title = None
+            settings.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(settings)
+        return settings or await get_or_create_settings()
 
 
 # ==========================================
