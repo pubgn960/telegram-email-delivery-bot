@@ -2,8 +2,10 @@
 Media Group Collector module supporting debounced album buffering for Reply-Based Delivery Workflow.
 Buffers incoming images/documents replied to an order message, links them via Order ID,
 and triggers automated Delivery Group dispatching upon completion.
+Also maintains short-lived user email session tracking.
 """
 
+import time
 import asyncio
 import logging
 from collections import OrderedDict
@@ -14,6 +16,31 @@ from config import Config
 from database import add_images_to_order
 
 logger = logging.getLogger(__name__)
+
+
+class UserSessionManager:
+    """
+    Manages short-lived (5-minute) user email session tracking.
+    Stores email addresses sent by users to correlate subsequent messages within timeout.
+    """
+
+    def __init__(self, timeout: float = Config.USER_SESSION_TIMEOUT):
+        self.timeout = timeout
+        self.sessions: Dict[int, Tuple[str, float]] = {}
+
+    def update_session(self, user_id: int, email: str) -> None:
+        """Stores user email with current timestamp."""
+        self.sessions[user_id] = (email.lower().strip(), time.time())
+
+    def get_session_email(self, user_id: int) -> Optional[str]:
+        """Retrieves user email if within session timeout window."""
+        if user_id not in self.sessions:
+            return None
+        email, timestamp = self.sessions[user_id]
+        if time.time() - timestamp > self.timeout:
+            del self.sessions[user_id]
+            return None
+        return email
 
 
 class MediaGroupCollector:
@@ -174,5 +201,6 @@ class MediaGroupCollector:
             )
 
 
-# Singleton collector instance
+# Singletons
+user_session_manager = UserSessionManager()
 media_collector = MediaGroupCollector()
