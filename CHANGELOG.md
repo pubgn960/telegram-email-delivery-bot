@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-08-09
+
+### Changed
+- **Fixed Payment Review Group Constant (`-1004441603990`)**:
+  - Configured fixed default Payment Review Group Chat ID `PAYMENT_REVIEW_GROUP_ID = -1004441603990` in `config.py`.
+  - Every order from Category B Client Groups (`/B`) is automatically routed to Payment Review Group `-1004441603990` out of the box without requiring `/paymentgroup`.
+  - Commands `/approve <order_id>` and `/reject <order_id>` enforce execution strictly inside Payment Review Group `-1004441603990` (or by Super Admin).
+
 ## [1.15.0] - 2026-08-09
 
 ### Added & Changed
@@ -13,10 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Pre-loaded `ClientGroup` categories into RAM (`CLIENT_GROUPS_CACHE`) on bot startup during `post_init()`.
   - **Category A (Trusted Groups)**: Orders are forwarded directly to Loader Group (status `Pending`).
   - **Category B (Payment Required Groups)**: Orders are forwarded to private Payment Review Group (status `Pending Payment`).
-  - **Payment Review Commands**:
-    - `/paymentgroup`: Configures private Payment Review Group.
-    - `/approve <order_id>`: Approves Category B order, updates status to `Approved`, and forwards original message to Loader Group.
-    - `/reject <order_id>`: Rejects Category B order, updates status to `Rejected`.
   - **Category Commands**:
     - `/A`: Assigns group to Category A (`✅ This group has been assigned to Category A.`).
     - `/B`: Assigns group to Category B (`✅ This group has been assigned to Category B.`).

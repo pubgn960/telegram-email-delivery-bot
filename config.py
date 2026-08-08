@@ -1,7 +1,8 @@
 """
 Configuration management for Telegram Email Image Delivery Bot.
-Only 3 core environment variables are required: BOT_TOKEN, ADMIN_IDS, and DATABASE_URL.
+Core environment variables: BOT_TOKEN, ADMIN_IDS, DATABASE_URL, and PAYMENT_REVIEW_GROUP_ID.
 Group configurations are managed dynamically via Telegram commands (/source and /delivery) and stored in DB.
+Fixed Payment Review Group default ID: -1004441603990.
 """
 
 import os
@@ -47,6 +48,9 @@ class Config:
     ADMIN_IDS: Set[int] = set()
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
 
+    # Fixed Payment Review Group Chat ID (-1004441603990)
+    PAYMENT_REVIEW_GROUP_ID: int = safe_int("PAYMENT_REVIEW_GROUP_ID", -1004441603990)
+
     # Media Group Debounce Window (seconds)
     MEDIA_GROUP_TIMEOUT: float = safe_float("MEDIA_GROUP_TIMEOUT", 2.0)
 
@@ -69,6 +73,7 @@ class Config:
         cls.BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
         cls.RAW_ADMIN_IDS = os.getenv("ADMIN_IDS", "")
         cls.DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
+        cls.PAYMENT_REVIEW_GROUP_ID = safe_int("PAYMENT_REVIEW_GROUP_ID", -1004441603990)
         cls.MEDIA_GROUP_TIMEOUT = safe_float("MEDIA_GROUP_TIMEOUT", 2.0)
         cls.USER_SESSION_TIMEOUT = safe_float("USER_SESSION_TIMEOUT", 300.0)
         cls.MAX_RETRY = safe_int("MAX_RETRY", 3)

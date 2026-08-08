@@ -4,7 +4,7 @@ Implements Two-Group Reply-Based Workflow, Privacy Protection (Exact Customer Me
 Keyword-Based Order Detection (keywords.py), Caption Email Overrides, Wrong Details Workflow,
 Duplicate Order Confirmation (Place Again / Cancel Inline Buttons), Edited Message Handling,
 Ignore Super Admin & Delivery User Messages in Client Group, Silent Non-Reply/Unmatched Reply Handling in Loader Group,
-Group Category Routing System (v1.2: Category A vs Category B /paymentgroup, /A, /B, /category, /removecategory, /approve, /reject),
+Group Category Routing System (v1.2: Category A vs Category B with fixed Payment Review Group -1004441603990),
 Role-Based User Management (/user, /users), Telegram Reactions, and Admin Commands.
 Utilizes global BOT_SETTINGS, AUTH_USERS_CACHE, and CLIENT_GROUPS_CACHE for zero-database-query filtering.
 Includes structured logging tags ([CLIENT], [LOADER], [DELIVERY], [REACTION], [DETECTOR], [SOURCE], [DELIVERY_GROUP], [AUTH], [CATEGORY], [PAYMENT]).
@@ -88,7 +88,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     Ignores messages sent by Super Admins and Delivery Users.
     Routes orders according to Group Category:
     - Category A (Trusted Groups): Directly forwards to Loader Group.
-    - Category B (Payment Required Groups): Routes to Payment Review Group for /approve or /reject.
+    - Category B (Payment Required Groups): Routes to Payment Review Group (-1004441603990) for /approve or /reject.
     """
     message = update.effective_message
     chat = update.effective_chat
@@ -175,7 +175,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.warning("Reaction not supported.")
 
     if category == "B":
-        # Category B Workflow: Forward to Payment Review Group, set status 'Pending Payment'
+        # Category B Workflow: Forward to Payment Review Group (-1004441603990), set status 'Pending Payment'
         order = await create_order(
             email=email,
             client_chat_id=chat.id,
@@ -184,7 +184,7 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             status="Pending Payment"
         )
 
-        payment_group_id = BOT_SETTINGS["payment_review_group_id"]
+        payment_group_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
         if payment_group_id:
             try:
                 try:
@@ -590,10 +590,19 @@ async def paymentgroup_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /approve <order_id> command executed inside Payment Review Group (or by Super Admin).
+    /approve <order_id> command executed inside Payment Review Group (-1004441603990) or by Super Admin.
     Updates order status to Approved, forwards original order to Loader Group.
     """
-    if not await check_admin_permission(update):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    payment_review_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
+    is_in_payment_group = bool(chat and chat.id == payment_review_id)
+    is_admin_user = is_super_admin(user.id if user else None)
+
+    if not is_in_payment_group and not is_admin_user:
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔ This command can only be used inside the Payment Review Group.")
         return
 
     if not context.args or not context.args[0].lstrip("#").isdigit():
@@ -637,10 +646,19 @@ async def approve_order_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def reject_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /reject <order_id> command executed inside Payment Review Group (or by Super Admin).
+    /reject <order_id> command executed inside Payment Review Group (-1004441603990) or by Super Admin.
     Updates order status to Rejected. Does NOT forward to Loader Group.
     """
-    if not await check_admin_permission(update):
+    chat = update.effective_chat
+    user = update.effective_user
+
+    payment_review_id = BOT_SETTINGS["payment_review_group_id"] or Config.PAYMENT_REVIEW_GROUP_ID
+    is_in_payment_group = bool(chat and chat.id == payment_review_id)
+    is_admin_user = is_super_admin(user.id if user else None)
+
+    if not is_in_payment_group and not is_admin_user:
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔ This command can only be used inside the Payment Review Group.")
         return
 
     if not context.args or not context.args[0].lstrip("#").isdigit():

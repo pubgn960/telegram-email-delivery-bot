@@ -41,10 +41,10 @@ AsyncSessionLocal = async_sessionmaker(
 BOT_SETTINGS: Dict[str, Any] = {
     "source_group_id": None,
     "delivery_group_id": None,
-    "payment_review_group_id": None,
+    "payment_review_group_id": Config.PAYMENT_REVIEW_GROUP_ID,
     "source_group_title": None,
     "delivery_group_title": None,
-    "payment_review_group_title": None
+    "payment_review_group_title": "Payment Review Group"
 }
 
 # Global in-memory user permission cache: telegram_user_id -> role ('admin' or 'delivery')
@@ -102,8 +102,8 @@ async def get_or_create_settings() -> Settings:
                 source_group_title=None,
                 delivery_group_id=None,
                 delivery_group_title=None,
-                payment_review_group_id=None,
-                payment_review_group_title=None,
+                payment_review_group_id=Config.PAYMENT_REVIEW_GROUP_ID,
+                payment_review_group_title="Payment Review Group",
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -127,10 +127,10 @@ async def reload_bot_settings_cache() -> Dict[str, Any]:
     settings = await get_or_create_settings()
     BOT_SETTINGS["source_group_id"] = settings.source_group_id
     BOT_SETTINGS["delivery_group_id"] = settings.delivery_group_id
-    BOT_SETTINGS["payment_review_group_id"] = getattr(settings, "payment_review_group_id", None)
+    BOT_SETTINGS["payment_review_group_id"] = getattr(settings, "payment_review_group_id", None) or Config.PAYMENT_REVIEW_GROUP_ID
     BOT_SETTINGS["source_group_title"] = settings.source_group_title
     BOT_SETTINGS["delivery_group_title"] = settings.delivery_group_title
-    BOT_SETTINGS["payment_review_group_title"] = getattr(settings, "payment_review_group_title", None)
+    BOT_SETTINGS["payment_review_group_title"] = getattr(settings, "payment_review_group_title", None) or "Payment Review Group"
 
     # Pre-load Client Groups into CLIENT_GROUPS_CACHE in RAM
     async with AsyncSessionLocal() as session:
@@ -179,8 +179,8 @@ async def update_source_group(chat_id: int, title: str) -> Settings:
                 source_group_title=title,
                 delivery_group_id=None,
                 delivery_group_title=None,
-                payment_review_group_id=None,
-                payment_review_group_title=None,
+                payment_review_group_id=Config.PAYMENT_REVIEW_GROUP_ID,
+                payment_review_group_title="Payment Review Group",
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -216,8 +216,8 @@ async def update_delivery_group(chat_id: int, title: str) -> Settings:
                 source_group_title=None,
                 delivery_group_id=chat_id,
                 delivery_group_title=title,
-                payment_review_group_id=None,
-                payment_review_group_title=None,
+                payment_review_group_id=Config.PAYMENT_REVIEW_GROUP_ID,
+                payment_review_group_title="Payment Review Group",
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -316,8 +316,8 @@ async def reset_groups() -> Settings:
             settings.source_group_title = None
             settings.delivery_group_id = None
             settings.delivery_group_title = None
-            settings.payment_review_group_id = None
-            settings.payment_review_group_title = None
+            settings.payment_review_group_id = Config.PAYMENT_REVIEW_GROUP_ID
+            settings.payment_review_group_title = "Payment Review Group"
             settings.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
@@ -333,7 +333,7 @@ async def set_client_group_category(chat_id: int, title: str, category: str) -> 
     """
     Sets or updates Client Group category ('A' or 'B') in DB and refreshes CLIENT_GROUPS_CACHE.
     Category A: Trusted Groups (Direct to Loader Group)
-    Category B: Payment Required Groups (Forward to Payment Review Group)
+    Category B: Payment Required Groups (Forward to Payment Review Group -1004441603990)
     """
     cat_clean = category.upper().strip()
     if cat_clean not in ("A", "B"):
